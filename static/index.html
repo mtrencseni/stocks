@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stocks</title>
+  <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="icon" href="favicon.ico" sizes="any" />
+  <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.31/dist/uPlot.min.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="toolbar">
+    <div class="ranges" id="ranges">
+      <button data-range="1d" class="active">1D</button>
+      <button data-range="1w">1W</button>
+      <button data-range="1mo">1M</button>
+      <button data-range="3mo">3M</button>
+      <button data-range="6mo">6M</button>
+      <button data-range="1y">1Y</button>
+      <button data-range="5y">5Y</button>
+    </div>
+    <div class="ranges" id="metrics">
+      <button data-metric="price" class="active">Price</button>
+      <button data-metric="pe">P/E</button>
+      <button data-metric="ps">P/S</button>
+    </div>
+    <div class="ranges" id="yaxis">
+      <button data-yaxis="per" class="active">Local</button>
+      <button data-yaxis="shared">Global</button>
+    </div>
+    <div class="tb-right">
+      <span class="status" id="status"></span>
+      <button class="ghost" id="edit">Edit symbols</button>
+    </div>
+    <nav class="ticker-nav" id="tickerNav"></nav>
+  </header>
+
+  <main id="grid" class="grid"></main>
+
+  <script src="https://unpkg.com/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
