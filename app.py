@@ -30,6 +30,8 @@ import pandas as pd
 import yfinance as yf
 from flask import Flask, jsonify, request, send_from_directory
 
+from screener import build_screener, LOOKBACK_YEARS, UNIVERSES, segment_label
+
 warnings.filterwarnings("ignore")
 
 app = Flask(__name__, static_folder="static", static_url_path="")
@@ -42,11 +44,13 @@ RANGES = {
     "3mo": dict(period="3mo", interval="1d",  prepost=False),
     "6mo": dict(period="6mo", interval="1d",  prepost=False),
     "1y":  dict(period="1y",  interval="1d",  prepost=False),
+    "3y":  dict(years=3,      interval="1d",  prepost=False),   # yfinance has no "3y" period -> start/end
     "5y":  dict(period="5y",  interval="1d",  prepost=False),
 }
 
 # seconds a cached response stays fresh
-TTL = {"1d": 60, "1w": 300, "1mo": 3600, "3mo": 3600, "6mo": 3600, "1y": 3600, "5y": 3600}
+TTL = {"1d": 60, "1w": 300, "1mo": 3600, "3mo": 3600, "6mo": 3600,
+       "1y": 3600, "3y": 3600, "5y": 3600}
 STATS_TTL = 1800  # today's snapshot stats; refreshed at most every 30 min
 
 REGULAR_OPEN = (9, 30)   # America/New_York
@@ -59,6 +63,10 @@ _cache = {}        # (range, (sym, ...), metric) -> (fetched_at, payload)
 _stats_cache = {}  # (sym, ...) -> (fetched_at, payload)
 _info_cache = {}   # sym -> (fetched_at, info dict)
 INFO_TTL = 1800
+
+_screener_cache = {}   # (universe, lookback) -> (fetched_at, payload)
+SCREENER_TTL = 6 * 3600   # daily data; recompute at most every 6h
+EARN_TTL = 12 * 3600      # earnings are quarterly-stable; refresh at most every 12h
 
 
 def _f(x):
@@ -80,6 +88,11 @@ def get_info(sym):
         info = yf.Ticker(sym).info
     except Exception:
         info = {}
+    # keep-last-good: a transient empty/partial .info must not wipe a good cache
+    # (this is what made descriptions vanish when the 30-min cache refreshed)
+    if (not info or not info.get("longName")) and hit:
+        _info_cache[sym] = (now, hit[1])
+        return hit[1]
     _info_cache[sym] = (now, info)
     return info
 
@@ -147,8 +160,15 @@ def _series_plain(close):
 
 def build(rng, symbols):
     params = dict(RANGES[rng])
-    df = yf.download(symbols, group_by="ticker", progress=False,
-                     threads=True, **params)
+    years = params.pop("years", None)
+    if years:   # no fixed yfinance period for this; use an explicit start/end window
+        end = pd.Timestamp.today()
+        start = end - pd.DateOffset(years=years)
+        df = yf.download(symbols, group_by="ticker", progress=False, threads=True,
+                         start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"),
+                         **params)
+    else:
+        df = yf.download(symbols, group_by="ticker", progress=False, threads=True, **params)
     multi = isinstance(df.columns, pd.MultiIndex)
 
     series = {}
@@ -173,8 +193,12 @@ def build(rng, symbols):
 
 MT_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
          "(KHTML, like Gecko) Chrome/120 Safari/537.36")
-MT_METRICS = {"pe": "pe-ratio", "ps": "price-sales"}   # our key -> macrotrends path
-MT_INTERVAL = 60      # seconds between scrape requests (<=1/min)
+# our key -> macrotrends path. Ratios use a 4-col page (value = TTM per-share at
+# col 2); financials use a 2-col quarterly page (value at col 1, in $millions).
+MT_RATIOS = {"pe": "pe-ratio", "ps": "price-sales"}
+MT_FINANCIALS = {"revenue": "revenue", "netIncome": "net-income"}
+MT_PATH = {**MT_RATIOS, **MT_FINANCIALS}
+MT_INTERVAL = 5       # seconds between scrape requests
 MT_COOLDOWN = 900     # don't retry a failed (sym,metric) for 15 min
 # which yfinance .info field is the *current* trailing per-share denominator
 ANCHOR_FIELD = {"pe": "trailingEps", "ps": "revenuePerShare"}
@@ -230,10 +254,24 @@ def _mt_parse(html):
     return rows
 
 
+def _mt_parse_series(html):
+    """Quarterly financial pages (revenue, net-income): a 2-col table whose
+    date-rows are 'date | value' (value already in $millions). -> [[date, value]]
+    ascending, deduped by date. Only quarter-end rows carry a YYYY-MM-DD date."""
+    seen = {}
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S):
+        c = [re.sub("<[^>]+>", "", x).replace("$", "").replace(",", "").strip()
+             for x in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S)]
+        if len(c) >= 2 and re.match(r"^\d{4}-\d{2}-\d{2}$", c[0]):
+            seen[c[0]] = _f(c[1])
+    return sorted(([d, v] for d, v in seen.items()), key=lambda r: r[0])
+
+
 def scrape_one(sym, metric):
     """Scrape a single (sym, metric) page and persist it. Raises on failure."""
-    url = f"https://www.macrotrends.net/stocks/charts/{sym}/x/{MT_METRICS[metric]}"
-    rows = _mt_parse(_mt_fetch(url))
+    url = f"https://www.macrotrends.net/stocks/charts/{sym}/x/{MT_PATH[metric]}"
+    html = _mt_fetch(url)
+    rows = _mt_parse(html) if metric in MT_RATIOS else _mt_parse_series(html)
     if not rows:
         raise RuntimeError("parsed 0 rows")
     _save_metric(sym, metric, rows)
@@ -268,7 +306,7 @@ def _next_unit():
     now = time.time()
     for sym in known_symbols():
         data = load_fundamentals(sym)
-        for metric in MT_METRICS:
+        for metric in MT_PATH:
             m = data.get(metric)
             fresh = m and m.get("rows") and m.get("scraped_at", "")[:10] == today
             if fresh:
@@ -415,10 +453,183 @@ def stats():
     return jsonify(payload)
 
 
+# ----------------------------------------------------------------------------
+# Per-stock profile + earnings (for the detail-view header)
+# ----------------------------------------------------------------------------
+
+def _save_earnings(sym, payload):
+    """Persist earnings under the symbol's data file (keep-last-good source)."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    data = load_fundamentals(sym)
+    data["earnings"] = {"fetched_at": time.time(), **payload}
+    tmp = _data_path(sym) + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, _data_path(sym))   # atomic
+
+
+def fetch_earnings(sym):
+    """yfinance earnings dates -> {past:[...most recent first, 4], next:{date,estimated}}."""
+    df = yf.Ticker(sym).get_earnings_dates(limit=16)
+    past, nxt = [], None
+    if df is not None and len(df):
+        df = df.sort_index()   # ascending by date
+        tz = df.index.tz
+        now = pd.Timestamp.now(tz=tz) if tz is not None else pd.Timestamp.now()
+        for idx, row in df.iterrows():
+            est = _f(row.get("EPS Estimate"))
+            rep = _f(row.get("Reported EPS"))
+            date = idx.date().isoformat()
+            if rep is not None:                         # reported -> a past quarter
+                beat = (rep > est) if est is not None else None
+                sur = ((rep - est) / abs(est) * 100) if est not in (None, 0) else None
+                past.append({"date": date, "epsEst": est, "epsActual": rep,
+                             "surprisePct": _f(sur), "beat": beat})
+            elif idx >= now and nxt is None:            # earliest future -> next report
+                nxt = {"date": date, "estimated": False}
+        past = list(reversed(past))                     # most recent first (full window; header slices 4)
+    if nxt is None:                                     # fall back to .info's single ts
+        ts = get_info(sym).get("earningsTimestamp")
+        if ts:
+            nxt = {"date": datetime.fromtimestamp(ts, NY).date().isoformat(), "estimated": True}
+    return {"past": past, "next": nxt}
+
+
+def get_earnings(sym):
+    """Cached earnings: serve the file if fresh; else refetch; keep-last-good on failure."""
+    cached = load_fundamentals(sym).get("earnings")
+    if cached and time.time() - cached.get("fetched_at", 0) < EARN_TTL:
+        return {"past": cached.get("past", []), "next": cached.get("next")}
+    try:
+        e = fetch_earnings(sym)
+        _save_earnings(sym, e)
+        return e
+    except Exception as exc:
+        print(f"[earnings] {sym} failed: {exc}", flush=True)
+        if cached:
+            return {"past": cached.get("past", []), "next": cached.get("next")}
+        return {"past": [], "next": None}
+
+
+def _save_profile(sym, prof):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    data = load_fundamentals(sym)
+    data["profile"] = prof
+    tmp = _data_path(sym) + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, _data_path(sym))   # atomic
+
+
+def build_profile(sym):
+    info = get_info(sym)
+    prof = {
+        "name":        info.get("longName") or info.get("shortName") or sym,
+        "exchange":    info.get("fullExchangeName") or info.get("exchange"),
+        "currency":    info.get("currency"),
+        "sector":      info.get("sector"),
+        "industry":    info.get("industry"),
+        "segment":     segment_label(sym),
+        "description": info.get("longBusinessSummary"),
+    }
+    # persist + keep-last-good: only overwrite the saved copy with a complete one,
+    # and fall back to the saved copy when a fresh fetch comes back incomplete.
+    saved = load_fundamentals(sym).get("profile")
+    if prof.get("name") and prof.get("description"):
+        if prof != saved:
+            _save_profile(sym, prof)
+        return prof
+    return saved or prof
+
+
+@app.route("/api/profile")
+def profile():
+    sym = request.args.get("symbol", "").strip().upper()
+    if not sym:
+        return jsonify(error="bad request: need symbol"), 400
+    remember_symbols([sym])
+    try:
+        payload = {"symbol": sym, "profile": build_profile(sym), "earnings": get_earnings(sym)}
+    except Exception as exc:
+        return jsonify(error=f"profile failed: {exc}"), 502
+    return jsonify(payload)
+
+
+# ----------------------------------------------------------------------------
+# Quarterly financials: sales (revenue) + earnings (net income), with TTM
+# ----------------------------------------------------------------------------
+
+FIN_KEYS = ("revenue", "netIncome")
+FIN_QUARTERS = 24       # how many recent quarters to display
+
+
+def _quarter_epoch(date_str):
+    """Quarter-end 'YYYY-MM-DD' -> epoch at 16:00 ET (consistent with price ts)."""
+    dt = datetime.fromisoformat(date_str + "T16:00:00").replace(tzinfo=NY)
+    return int(dt.timestamp())
+
+
+def build_financials(sym, n=FIN_QUARTERS):
+    """Per-metric quarterly values + a trailing-4-quarter (TTM) rolling sum.
+    Returns aligned arrays (t, q, ttm); ttm is null until 4 quarters accrue.
+    Keeps 3 extra leading quarters off-screen so TTM is defined at the window
+    start. Values are in $millions; net income may be negative (loss quarters)."""
+    data = load_fundamentals(sym)
+    series = {}
+    for key in FIN_KEYS:
+        rows = [r for r in (data.get(key, {}).get("rows") or []) if r[1] is not None]
+        rows = rows[-(n + 3):]
+        vals = [r[1] for r in rows]
+        ttm = [None] * len(rows)
+        for i in range(3, len(rows)):
+            ttm[i] = sum(vals[i - 3:i + 1])
+        rows, vals, ttm = rows[-n:], vals[-n:], ttm[-n:]   # drop the leading padding
+        series[key] = {"t": [_quarter_epoch(r[0]) for r in rows], "q": vals, "ttm": ttm}
+    return {"symbol": sym, "currency": get_info(sym).get("currency") or "USD",
+            "unit": "millions", "series": series}
+
+
+@app.route("/api/financials")
+def financials():
+    sym = request.args.get("symbol", "").strip().upper()
+    if not sym:
+        return jsonify(error="bad request: need symbol"), 400
+    remember_symbols([sym])
+    try:
+        payload = build_financials(sym)
+    except Exception as exc:
+        return jsonify(error=f"financials failed: {exc}"), 502
+    return jsonify(payload)
+
+
+@app.route("/api/screener")
+def screener():
+    universe = request.args.get("universe", "ndx100")
+    lookback = request.args.get("lookback", "3y")
+    if lookback not in LOOKBACK_YEARS or universe not in UNIVERSES:
+        return jsonify(error="bad request: need valid universe, lookback"), 400
+
+    key = (universe, lookback)
+    now = time.time()
+    hit = _screener_cache.get(key)
+    if hit and now - hit[0] < SCREENER_TTL:
+        return jsonify(hit[1])
+
+    try:
+        payload = build_screener(lookback, universe)
+    except Exception as exc:
+        return jsonify(error=f"screener failed: {exc}"), 502
+
+    _screener_cache[key] = (now, payload)
+    return jsonify(payload)
+
+
 @app.after_request
 def no_store(resp):
-    # never let the browser serve cached market data
-    if request.path.startswith("/api/"):
+    # never let the browser serve cached market data; also skip caching the app's
+    # own assets so code edits show up on a normal reload (no hard-refresh needed)
+    p = request.path
+    if p.startswith("/api/") or p == "/" or p.endswith((".js", ".css", ".html")):
         resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -430,4 +641,5 @@ def index():
 
 if __name__ == "__main__":
     start_scraper()   # background macrotrends refresh (<=1 req/min)
-    app.run(host="127.0.0.1", port=8050, debug=False)
+    # threaded: a slow /api/screener build must not block the dashboard endpoints
+    app.run(host="127.0.0.1", port=8050, debug=False, threaded=True)
