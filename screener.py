@@ -65,6 +65,18 @@ IND_LABEL = {
 }
 
 
+# yfinance .info "exchange" codes -> friendly exchange label
+EXCH_LABEL = {
+    "NMS": "NASDAQ", "NGM": "NASDAQ", "NCM": "NASDAQ", "NIM": "NASDAQ", "NGS": "NASDAQ",
+    "NYQ": "NYSE", "PCX": "NYSE Arca", "ASE": "NYSE American",
+    "BATS": "Cboe", "BTS": "Cboe",
+}
+
+
+def exchange_label(code):
+    return EXCH_LABEL.get(code, code or "")
+
+
 def segment_label(sym):
     """Our curated segment for a ticker, e.g. 'Software/SaaS (IGV)'. None if unmapped."""
     etf = IND.get(sym)
@@ -265,6 +277,11 @@ def _attach_fundamentals(rows):
         infos = {}
     for r in rows:
         info = infos.get(r["sym"]) or {}
+        r["name"] = info.get("shortName") or info.get("longName") or ""
+        r["exchange"] = exchange_label(info.get("exchange"))
+        eps = _f(info.get("trailingEps"))
+        ni = _f(info.get("netIncomeToCommon"))
+        r["profitable"] = bool((eps is not None and eps > 0) or (ni is not None and ni > 0))
         pe = _f(info.get("trailingPE"))
         ps = _f(info.get("priceToSalesTrailing12Months"))
         rg = _f(info.get("revenueGrowth"))

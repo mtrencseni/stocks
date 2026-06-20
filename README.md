@@ -27,6 +27,30 @@ python3 -m venv .venv
 .venv/bin/python app.py
 ```
 
+Listens on `127.0.0.1:8050` (override with the `PORT` env var).
+
+### Running under a supervisor (restartable)
+
+To restart the server in place — handy when it lives in a long-lived `screen`
+session — launch it via the supervisor instead of calling `app.py` directly:
+
+```bash
+screen -S stocks ./run.sh
+```
+
+`run.sh` relaunches the server whenever it exits with code `42`; any other exit
+(Ctrl-C, crash) stops the supervisor. Three ways to trigger a restart:
+
+```bash
+./restart.sh                                 # reads server.pid, sends SIGHUP
+kill -HUP "$(cat server.pid)"                # same thing, by hand
+curl -X POST localhost:8050/api/restart      # local-only HTTP endpoint
+```
+
+The server writes its PID to `server.pid` on startup. Restarts reuse the same
+`screen` window and launch command, so deployed code changes go live without
+re-attaching.
+
 ## How data is fetched
 
 - Two JSON endpoints:

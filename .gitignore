@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .claude/
 data/
+secrets.json
+server.pid

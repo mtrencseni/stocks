@@ -63,6 +63,7 @@ export class ExplorePane {
     this.closable = false;
     this.onOpenStock = opts.onOpenStock || (() => {});
     this.viewState = { lookback: "3y" };   // in-memory, resets on reload
+    this.filters = { exchanges: new Set(), industries: new Set(), profitable: false };
     this.charts = [];
     this.inited = false;
   }
@@ -75,8 +76,14 @@ export class ExplorePane {
         <div class="ranges" data-group="lookback">
           ${LOOKBACKS.map((l) => `<button data-lb="${l}">${l.toUpperCase()}</button>`).join("")}
         </div>
+        <div class="explore-search">
+          <input class="explore-search-input" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="Search ticker or name…" />
+          <div class="explore-search-results" hidden></div>
+        </div>
         <div class="tb-right"><span class="status"></span></div>
       </header>
+      <div class="explore-filters"></div>
       <main class="explore-grid">
         <div class="explore-cell" data-cell="tl"></div>
         <div class="explore-cell" data-cell="tr"></div>
@@ -108,8 +115,67 @@ export class ExplorePane {
     container.appendChild(root);
     this.root = root;
     this.statusEl = root.querySelector(".status");
+    this.searchInput = root.querySelector(".explore-search-input");
+    this.searchResults = root.querySelector(".explore-search-results");
+    this.filtersEl = root.querySelector(".explore-filters");
+    this.stocks = [];
     this.cells = {};
     for (const p of PANELS) this.cells[p.key] = root.querySelector(`[data-cell="${p.key}"]`);
+
+    this.searchInput.addEventListener("input", () => this._renderSearch());
+    this.searchInput.addEventListener("focus", () => this._renderSearch());
+    this.searchInput.addEventListener("keydown", (e) => {
+      const open = !this.searchResults.hidden && this._hits && this._hits.length;
+      if (e.key === "ArrowDown") {
+        if (open) { e.preventDefault(); this._setActive(this._activeIdx + 1); }
+      } else if (e.key === "ArrowUp") {
+        if (open) { e.preventDefault(); this._setActive(this._activeIdx - 1); }
+      } else if (e.key === " " || e.key === "Spacebar") {
+        // space = highlight the dots across all panels, then close
+        const sym = this._activeSym();
+        if (open && sym) { e.preventDefault(); this._pickSearch(sym); }
+      } else if (e.key === "Enter") {
+        // enter = open the stock detail page
+        const sym = this._activeSym();
+        if (open && sym) { e.preventDefault(); this._openDetails(sym); }
+      } else if (e.key === "Escape") {
+        this._hideSearch();
+        this.searchInput.blur();
+      }
+    });
+    this.searchResults.addEventListener("click", (e) => {
+      const det = e.target.closest(".esr-details");
+      if (det) { e.stopPropagation(); this._openDetails(det.dataset.sym); return; }
+      const item = e.target.closest("[data-sym]");
+      if (item) this._pickSearch(item.dataset.sym);
+    });
+    this.searchResults.addEventListener("mousemove", (e) => {
+      const item = e.target.closest("[data-sym]");
+      if (item && this._hits) this._setActive(this._hits.indexOf(item.dataset.sym));
+    });
+    // click outside the search box dismisses the dropdown
+    this._onDocClick = (e) => {
+      if (!root.querySelector(".explore-search").contains(e.target)) this._hideSearch();
+    };
+    document.addEventListener("click", this._onDocClick);
+
+    this.filtersEl.addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      if (b.dataset.clear) {
+        this.filters.exchanges.clear();
+        this.filters.industries.clear();
+        this.filters.profitable = false;
+      } else if (b.dataset.prof) {
+        this.filters.profitable = !this.filters.profitable;
+      } else if (b.dataset.group === "exchange") {
+        this._toggle(this.filters.exchanges, b.dataset.val);
+      } else if (b.dataset.group === "industry") {
+        this._toggle(this.filters.industries, b.dataset.val);
+      } else return;
+      this._buildFilterChips();
+      this._applyFilters();
+    });
 
     root.querySelector('[data-group="lookback"]').addEventListener("click", (e) => {
       const b = e.target.closest("button");
@@ -139,7 +205,60 @@ export class ExplorePane {
 
   destroy() {
     for (const c of this.charts) c.destroy();
+    if (this._onDocClick) document.removeEventListener("click", this._onDocClick);
     if (this.root) this.root.remove();
+  }
+
+  // ---- search ----
+
+  _renderSearch() {
+    const q = this.searchInput.value.trim().toLowerCase();
+    if (!q) { this._hideSearch(); return; }
+    const hits = this.stocks.filter((s) =>
+      s.sym.toLowerCase().includes(q) || (s.name || "").toLowerCase().includes(q))
+      .slice(0, 12);
+    this._hits = hits.map((s) => s.sym);
+    if (!hits.length) {
+      this.searchResults.innerHTML = `<div class="esr-empty">No matches</div>`;
+      this.searchResults.hidden = false;
+      return;
+    }
+    this.searchResults.innerHTML = hits.map((s) =>
+      `<div class="esr-item" data-sym="${s.sym}">` +
+        `<span class="esr-sym">${s.sym}</span>` +
+        `<span class="esr-name">${escapeHTML(s.name || "")}</span>` +
+        `<button class="esr-details" data-sym="${s.sym}">Details</button>` +
+      `</div>`).join("");
+    this.searchResults.hidden = false;
+    this._setActive(0);   // first result selected by default for keyboard nav
+  }
+
+  _activeSym() {
+    return (this._hits && this._activeIdx >= 0) ? this._hits[this._activeIdx] : null;
+  }
+
+  _setActive(idx) {
+    const n = this._hits ? this._hits.length : 0;
+    if (!n) { this._activeIdx = -1; return; }
+    this._activeIdx = ((idx % n) + n) % n;   // wrap around top/bottom
+    const items = this.searchResults.querySelectorAll(".esr-item");
+    items.forEach((el, i) => el.classList.toggle("active", i === this._activeIdx));
+    const cur = items[this._activeIdx];
+    if (cur) cur.scrollIntoView({ block: "nearest" });
+  }
+
+  _hideSearch() { this.searchResults.hidden = true; this._activeIdx = -1; }
+
+  // selecting a result highlights its dot across every panel (like a hover)
+  _pickSearch(sym) {
+    this.searchInput.value = sym;
+    this._hideSearch();
+    for (const c of this.charts) c.setHighlight(sym);
+  }
+
+  _openDetails(sym) {
+    this._hideSearch();
+    this.onOpenStock(sym);
   }
 
   async load() {
@@ -150,15 +269,17 @@ export class ExplorePane {
       const res = await fetch(`/api/screener?lookback=${encodeURIComponent(this.viewState.lookback)}`);
       const json = await res.json();
       if (json.error) throw new Error(json.error);
-      this._build(json.stocks);
-      this.statusEl.textContent =
+      this._baseStatus =
         `${json.stocks.length} stocks · ${json.lookback} · as of ${(json.asof || "").slice(0, 16).replace("T", " ")}`;
+      this.statusEl.textContent = this._baseStatus;
+      this._build(json.stocks);   // builds charts, chips, and applies current filters
     } catch (e) {
       this.statusEl.textContent = "Error: " + e.message;
     }
   }
 
   _build(stocks) {
+    this.stocks = stocks;   // keep for the search box
     // global encodings: drift color + volatility size, shared across all panels.
     // color = how IDEAL the drift is: green = flat (sweet spot), red = steep
     // (falling-knife OR at-ATH). So green = good everywhere.
@@ -194,13 +315,65 @@ export class ExplorePane {
         logX: panel.logX, logY: panel.logY, clipX: panel.clipX, clipY: panel.clipY,
         colorOf, radiusOf, tooltipHTML, onHover, onPick,
       });
-      chart.setData(stocks);
       this.charts.push(chart);
     }
+    this._buildFilterChips();
+    this._applyFilters();
     this.resizeAll();
+  }
+
+  // ---- filters ----
+
+  _toggle(set, val) { set.has(val) ? set.delete(val) : set.add(val); }
+
+  _buildFilterChips() {
+    const f = this.filters;
+    const exch = [...new Set(this.stocks.map((s) => s.exchange).filter(Boolean))].sort();
+    const inds = [...new Set(this.stocks.map((s) => s.ind).filter(Boolean))].sort();
+    const chip = (group, val, label, title, active) =>
+      `<button class="ef-chip${active ? " active" : ""}" data-group="${group}" ` +
+      `data-val="${escapeHTML(val)}"${title ? ` title="${escapeHTML(title)}"` : ""}>${escapeHTML(label)}</button>`;
+    const grp = (label, chips) =>
+      `<span class="ef-group"><span class="ef-label">${label}</span>${chips.join("")}</span>`;
+
+    let html = "";
+    if (exch.length)
+      html += grp("Exchange", exch.map((e) => chip("exchange", e, e, "", f.exchanges.has(e))));
+    if (inds.length)
+      html += grp("Industry", inds.map((i) =>
+        chip("industry", i, i, IND_LABEL[i] || i, f.industries.has(i))));
+    html += `<span class="ef-group">` +
+      `<button class="ef-chip ef-prof${f.profitable ? " active" : ""}" data-prof="1" ` +
+      `title="Only stocks with positive trailing earnings">Profitable</button></span>`;
+    const any = f.exchanges.size || f.industries.size || f.profitable;
+    if (any) html += `<button class="ef-clear" data-clear="1">Clear ✕</button>`;
+    this.filtersEl.innerHTML = html;
+  }
+
+  _matches(s) {
+    const f = this.filters;
+    if (f.exchanges.size && !f.exchanges.has(s.exchange)) return false;
+    if (f.industries.size && !f.industries.has(s.ind)) return false;
+    if (f.profitable && !s.profitable) return false;
+    return true;
+  }
+
+  _applyFilters() {
+    const shown = this.stocks.filter((s) => this._matches(s));
+    for (const c of this.charts) c.setData(shown);
+    if (this._baseStatus) {
+      this.statusEl.textContent = shown.length === this.stocks.length
+        ? this._baseStatus
+        : `${shown.length} of ${this._baseStatus}`;
+    }
   }
 
   resizeAll() { for (const c of this.charts) c.resize(); }
 }
 
 function fmt(v) { return v == null ? "—" : (Math.round(v * 100) / 100).toString(); }
+
+function escapeHTML(s) {
+  return (s || "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}

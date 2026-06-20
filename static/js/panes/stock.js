@@ -4,7 +4,10 @@
 // A synced 1x3: Price / P/E / P/S for the one symbol, sharing the range toggle
 // and a single crosshair group (the tooltip is synced across all three).
 
-import { getHistory, getStats, getProfile, getFinancials } from "../api.js";
+import {
+  getHistory, getStats, getProfile, getFinancials,
+  startOpinion, opinionStatus, listOpinions, getOpinion, deleteOpinion,
+} from "../api.js";
 import { buildCard, renderCard, renderZigzag, renderQuarterly, CrosshairGroup } from "../chart.js";
 import { statsHTML, fmtMoneyM, fmtPrice } from "../util.js";
 
@@ -12,6 +15,52 @@ function escapeHTML(s) {
   return (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 }
 function escapeAttr(s) { return escapeHTML(s).replace(/"/g, "&quot;"); }
+
+// markdown -> sanitized HTML (libs loaded via CDN in index.html)
+function mdHTML(md) {
+  try { return window.DOMPurify.sanitize(window.marked.parse(md || "")); }
+  catch (e) { return escapeHTML(md || ""); }
+}
+// "2026-06-20T15-37-46" -> "2026-06-20 15:37 (today)"
+function fmtTabTime(ts) {
+  const [d, t] = (ts || "").split("T");
+  if (!d) return ts;
+  const hm = (t || "").slice(0, 5).replace("-", ":");
+  return `${d} ${hm} (${relDay(d)})`;
+}
+function relDay(d) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const that = new Date(d + "T00:00:00"); that.setHours(0, 0, 0, 0);
+  const days = Math.round((today - that) / 86400000);
+  return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
+}
+
+// map yfinance's exchange name to Google Finance's suffix (needs SYM:EXCH)
+function gfExchange(ex) {
+  const s = (ex || "").toLowerCase();
+  if (s.includes("nasdaq") || ["nms", "ngm", "ncm", "nim", "ngs"].includes(s)) return "NASDAQ";
+  if (s.includes("arca") || s === "pcx") return "NYSEARCA";
+  if (s.includes("american") || s === "ase") return "NYSEAMERICAN";
+  if (s.includes("new york") || s === "nyse" || s === "nyq") return "NYSE";
+  if (s.includes("cboe") || s === "bats" || s === "bts") return "BATS";
+  return "";
+}
+
+// external research links for the header
+function extLinksHTML(sym, exchange) {
+  const s = encodeURIComponent(sym);
+  const gx = gfExchange(exchange);
+  const links = [
+    ["Google Finance", gx ? `https://www.google.com/finance/quote/${s}:${gx}`
+                          : `https://www.google.com/finance/quote/${s}`],
+    ["Yahoo Finance", `https://finance.yahoo.com/quote/${s}`],
+    ["Macrotrends", `https://www.macrotrends.net/stocks/charts/${s}/x/`],
+    ["Seeking Alpha", `https://seekingalpha.com/symbol/${s}`],
+  ];
+  return `<div class="si-links">` +
+    links.map(([t, u]) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`).join("") +
+    `</div>`;
+}
 
 function earningsHTML(e) {
   if (!e) return "";
@@ -67,6 +116,9 @@ export class StockPane {
     this.earningsData = null;
     this.finData = null;
     this.finEls = {};
+    this.tabs = [];           // opinion tabs: {key(ts), ts, jobId?, state, status?}
+    this.activeTab = "charts";
+    this.pollTimers = {};     // jobId -> interval handle
     this.inited = false;
   }
 
@@ -75,22 +127,39 @@ export class StockPane {
     root.className = "pane";
     root.innerHTML = `
       <section class="stock-info"></section>
-      <header class="toolbar">
-        <div class="ranges" data-group="ranges">
-          ${RANGES.map((r) => `<button data-range="${r}">${RANGE_LABEL[r]}</button>`).join("")}
+      <nav class="subtabs"></nav>
+      <div class="subwrap">
+        <div class="subview charts-view">
+          <header class="toolbar">
+            <div class="ranges" data-group="ranges">
+              ${RANGES.map((r) => `<button data-range="${r}">${RANGE_LABEL[r]}</button>`).join("")}
+            </div>
+            <div class="tb-right"><span class="status"></span></div>
+          </header>
+          <main class="grid detail-grid"></main>
         </div>
-        <div class="tb-right"><span class="status"></span></div>
-      </header>
-      <main class="grid detail-grid"></main>`;
+        <div class="subview opinion-view" hidden></div>
+      </div>`;
     container.appendChild(root);
     this.root = root;
     this.infoEl = root.querySelector(".stock-info");
+    this.subtabsEl = root.querySelector(".subtabs");
+    this.chartsView = root.querySelector(".charts-view");
+    this.opinionView = root.querySelector(".opinion-view");
     this.grid = root.querySelector(".grid");
     this.statusEl = root.querySelector(".status");
 
     root.querySelector('[data-group="ranges"]').addEventListener("click", (e) => {
       const b = e.target.closest("button");
       if (b) this.fetchAll(b.dataset.range);
+    });
+    this.subtabsEl.addEventListener("click", (e) => {
+      const del = e.target.closest("[data-del]");
+      if (del) { e.stopPropagation(); this._deleteOpinion(del.dataset.del); return; }
+      const add = e.target.closest('[data-act="new-opinion"]');
+      if (add) { this._startOpinion(); return; }
+      const tab = e.target.closest("[data-tab]");
+      if (tab) this._selectTab(tab.dataset.tab);
     });
   }
 
@@ -140,8 +209,10 @@ export class StockPane {
       this.fetchProfile();
       this.fetchFinancials();
       this.loadZigzag();
+      this._renderSubtabs();
+      this._loadOpinionList();
     }
-    this.resizeAll();
+    if (this.activeTab === "charts") this.resizeAll();
   }
   onDeactivate() {}
 
@@ -149,7 +220,161 @@ export class StockPane {
     for (const c of this.cards) if (c.chart) c.chart.destroy();
     for (const k in this.finEls) if (this.finEls[k].chart) this.finEls[k].chart.destroy();
     if (this.zzChart) this.zzChart.destroy();
+    for (const id in this.pollTimers) clearInterval(this.pollTimers[id]);
     if (this.root) this.root.remove();
+  }
+
+  // ---- AI opinion sub-tabs ----
+
+  _renderSubtabs() {
+    let html = `<button class="subtab${this.activeTab === "charts" ? " active" : ""}" data-tab="charts">Charts</button>`;
+    for (const t of this.tabs) {
+      const mark = t.state === "running" ? " ⏳" : t.state === "error" ? " ✗" : "";
+      const del = t.state === "running" ? "" :
+        `<span class="subtab-del" data-del="${t.key}" title="Delete this opinion">×</span>`;
+      html += `<button class="subtab${this.activeTab === t.key ? " active" : ""}" data-tab="${t.key}">` +
+        `Opinion ${fmtTabTime(t.ts)}${mark}${del}</button>`;
+    }
+    html += `<button class="subtab-add" data-act="new-opinion">✨ Get AI Opinion</button>`;
+    this.subtabsEl.innerHTML = html;
+  }
+
+  async _loadOpinionList() {
+    try {
+      const saved = await listOpinions(this.symbol);   // newest first
+      for (const o of saved) {
+        if (!this.tabs.some((t) => t.key === o.id)) {
+          this.tabs.push({ key: o.id, ts: o.ts, state: "saved", status: null });
+        }
+      }
+      this._renderSubtabs();
+    } catch (e) { /* best-effort */ }
+  }
+
+  _selectTab(key) {
+    this.activeTab = key;
+    const charts = key === "charts";
+    this.chartsView.hidden = !charts;
+    this.opinionView.hidden = charts;
+    this._renderSubtabs();
+    if (charts) { this.resizeAll(); return; }
+    this._renderOpinion(this.tabs.find((t) => t.key === key));
+  }
+
+  async _startOpinion() {
+    try {
+      const job = await startOpinion(this.symbol);   // uses backend ACTIVE_PROFILE
+      const tab = { key: job.ts, ts: job.ts, jobId: job.id, state: "running", status: null };
+      this.tabs.unshift(tab);
+      this._selectTab(tab.key);
+      this._pollOpinion(tab);
+    } catch (e) {
+      alert("Failed to start opinion: " + e.message);
+    }
+  }
+
+  async _deleteOpinion(key) {
+    const tab = this.tabs.find((t) => t.key === key);
+    if (!tab || tab.state === "running") return;
+    if (!confirm(`Delete this opinion (${fmtTabTime(tab.ts)})?`)) return;
+    try {
+      await deleteOpinion(this.symbol, key);
+    } catch (e) {
+      alert("Failed to delete: " + e.message);
+      return;
+    }
+    if (tab.jobId && this.pollTimers[tab.jobId]) {
+      clearInterval(this.pollTimers[tab.jobId]);
+      delete this.pollTimers[tab.jobId];
+    }
+    this.tabs = this.tabs.filter((t) => t.key !== key);
+    if (this.activeTab === key) this._selectTab("charts");
+    else this._renderSubtabs();
+  }
+
+  _pollOpinion(tab) {
+    const tick = async () => {
+      try {
+        const st = await opinionStatus(tab.jobId);
+        tab.status = st;
+        tab.state = st.state;
+        if (this.activeTab === tab.key) this._renderOpinion(tab);
+        if (st.state === "done" || st.state === "error") {
+          clearInterval(this.pollTimers[tab.jobId]);
+          delete this.pollTimers[tab.jobId];
+          this._renderSubtabs();
+        }
+      } catch (e) { /* transient; keep polling */ }
+    };
+    tick();
+    this.pollTimers[tab.jobId] = setInterval(tick, 2500);
+  }
+
+  async _renderOpinion(tab) {
+    if (!tab) return;
+    let data = tab.status;
+    if (!data) {
+      if (tab.jobId) {                            // running tab — not on disk yet
+        this.opinionView.innerHTML = `<div class="op-loading">Starting…</div>`;
+        return;
+      }
+      this.opinionView.innerHTML = `<div class="op-loading">Loading…</div>`;
+      try { data = await getOpinion(this.symbol, tab.key); tab.status = data; }
+      catch (e) { this.opinionView.innerHTML = `<div class="op-loading">Error: ${escapeHTML(e.message)}</div>`; return; }
+    }
+    if (data.state !== "done") this._renderRunning(data);
+    else this._renderDone(data);
+  }
+
+  _renderRunning(data) {
+    const stTxt = (s) => s === "running" ? "running…" : (s || "pending");
+    const row = (who, model, st, err) =>
+      `<tr class="op-row op-${st || "pending"}">` +
+      `<td class="op-r-who">${escapeHTML(who)}</td>` +
+      `<td class="op-r-model">${escapeHTML(model)}</td>` +
+      `<td class="op-r-status">${escapeHTML(stTxt(st))}` +
+      `${err ? " (" + escapeHTML(err) + ")" : ""}</td></tr>`;
+    const rows = (data.agents || []).map((a) =>
+      row(`agent ${a.i + 1}`, a.model, a.status, a.error)).join("");
+    const sum = data.summary
+      ? row("summarizer", data.summary.model, data.summary.status, data.summary.error) : "";
+    const log = (data.log || []).map(escapeHTML).join("\n");
+    this.opinionView.innerHTML =
+      `<div class="op-running"><h3>Working… <span class="op-prof">(${escapeHTML(data.profile)})</span></h3>` +
+      `<table class="op-table">${rows}${sum}</table><pre class="op-log">${log}</pre></div>`;
+  }
+
+  _renderDone(data) {
+    const runs = data.runs || [];
+    const picks = [`<button class="op-pick active" data-pick="summary">Summary</button>`]
+      .concat(runs.map((r) => `<button class="op-pick" data-pick="${r.i}">Agent ${r.i + 1}${r.error ? " ✗" : ""}</button>`))
+      .join("");
+    this.opinionView.innerHTML =
+      `<div class="op-picker">${picks}<span class="op-pick-spacer"></span>` +
+      `<button class="op-delete" data-act="delete">🗑 Delete</button></div>` +
+      `<div class="op-content"></div>`;
+    const content = this.opinionView.querySelector(".op-content");
+
+    const showSummary = () => { content.innerHTML = mdHTML(data.summary_md || "_No summary._"); };
+    const showRun = (i) => {
+      const r = runs.find((x) => x.i === i);
+      if (!r) return;
+      if (r.error) { content.innerHTML = `<p class="op-err">Failed: ${escapeHTML(r.error)}</p>`; return; }
+      const meta = `<div class="op-meta">${escapeHTML(r.provider)}:${escapeHTML(r.model)}` +
+        `${r.latency != null ? " · " + r.latency + "s" : ""}</div>`;
+      const js = r.structured
+        ? `<pre class="op-json">${escapeHTML(JSON.stringify(r.structured, null, 2))}</pre>` : "";
+      content.innerHTML = meta + js + mdHTML(r.freetext || "");
+    };
+    showSummary();
+    this.opinionView.querySelector(".op-picker").addEventListener("click", (e) => {
+      if (e.target.closest('[data-act="delete"]')) { this._deleteOpinion(data.ts); return; }
+      const b = e.target.closest("[data-pick]");
+      if (!b) return;
+      this.opinionView.querySelectorAll(".op-pick").forEach((x) => x.classList.toggle("active", x === b));
+      if (b.dataset.pick === "summary") showSummary();
+      else showRun(parseInt(b.dataset.pick, 10));
+    });
   }
 
   async loadZigzag() {
@@ -264,6 +489,7 @@ export class StockPane {
           `<div class="si-name">${escapeHTML(name)} <span class="si-sym">${this.symbol}</span>${price}</div>` +
           `<div class="si-meta">${escapeHTML(meta)}</div>` +
           descHTML +
+          extLinksHTML(this.symbol, p && p.exchange) +
         `</div>` + stats + earn +
       `</div>`;
     this.resizeAll();   // header height changed -> re-fit the charts below

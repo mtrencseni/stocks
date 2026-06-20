@@ -18,6 +18,8 @@ import json
 import math
 import os
 import re
+import signal
+import sys
 import threading
 import time
 import urllib.error
@@ -31,6 +33,7 @@ import yfinance as yf
 from flask import Flask, jsonify, request, send_from_directory
 
 from screener import build_screener, LOOKBACK_YEARS, UNIVERSES, segment_label
+import opinion
 
 warnings.filterwarnings("ignore")
 
@@ -624,6 +627,123 @@ def screener():
     return jsonify(payload)
 
 
+# ----------------------------------------------------------------------------
+# AI valuation opinions
+# ----------------------------------------------------------------------------
+
+def gather_stock_data(sym):
+    """Assemble the stock's important data for the LLM agents."""
+    info = get_info(sym)
+    return {
+        "symbol": sym,
+        "name": info.get("longName"),
+        "exchange": info.get("fullExchangeName") or info.get("exchange"),
+        "currency": info.get("currency"),
+        "sector": info.get("sector"),
+        "industry": info.get("industry"),
+        "segment": segment_label(sym),
+        "description": info.get("longBusinessSummary"),
+        "currentPrice": _f(info.get("currentPrice") or info.get("regularMarketPrice")),
+        "marketCap": _f(info.get("marketCap")),
+        "trailingPE": _f(info.get("trailingPE")),
+        "forwardPE": _f(info.get("forwardPE")),
+        "priceToSales": _f(info.get("priceToSalesTrailing12Months")),
+        "priceToBook": _f(info.get("priceToBook")),
+        "profitMargins": _f(info.get("profitMargins")),
+        "grossMargins": _f(info.get("grossMargins")),
+        "operatingMargins": _f(info.get("operatingMargins")),
+        "revenueGrowth": _f(info.get("revenueGrowth")),
+        "earningsGrowth": _f(info.get("earningsGrowth")),
+        "returnOnEquity": _f(info.get("returnOnEquity")),
+        "totalCash": _f(info.get("totalCash")),
+        "totalDebt": _f(info.get("totalDebt")),
+        "freeCashflow": _f(info.get("freeCashflow")),
+        "trailingEps": _f(info.get("trailingEps")),
+        "bookValue": _f(info.get("bookValue")),
+        "fiftyTwoWeekHigh": _f(info.get("fiftyTwoWeekHigh")),
+        "fiftyTwoWeekLow": _f(info.get("fiftyTwoWeekLow")),
+        "stats": build_stats([sym]).get(sym),
+        "earnings": get_earnings(sym),
+        "financials": build_financials(sym),
+    }
+
+
+@app.route("/api/opinion/start")
+def opinion_start():
+    sym = request.args.get("symbol", "").strip().upper()
+    if not sym:
+        return jsonify(error="bad request: need symbol"), 400
+    profile = request.args.get("profile")   # optional override; else opinion.ACTIVE_PROFILE
+    try:
+        data = gather_stock_data(sym)
+        job = opinion.start_job(sym, data, profile)
+    except Exception as exc:
+        return jsonify(error=f"opinion start failed: {exc}"), 502
+    return jsonify(job)
+
+
+@app.route("/api/opinion/status")
+def opinion_status():
+    st = opinion.status(request.args.get("job", ""))
+    if st is None:
+        return jsonify(error="unknown job"), 404
+    return jsonify(st)
+
+
+@app.route("/api/opinion/list")
+def opinion_list():
+    sym = request.args.get("symbol", "").strip().upper()
+    if not sym:
+        return jsonify(error="bad request: need symbol"), 400
+    return jsonify(opinions=opinion.list_opinions(sym))
+
+
+@app.route("/api/opinion/get")
+def opinion_get():
+    sym = request.args.get("symbol", "").strip().upper()
+    oid = request.args.get("id", "")
+    o = opinion.get_opinion(sym, oid)
+    if o is None:
+        return jsonify(error="not found"), 404
+    return jsonify(o)
+
+
+@app.route("/api/opinion/delete", methods=["POST"])
+def opinion_delete():
+    sym = request.args.get("symbol", "").strip().upper()
+    oid = request.args.get("id", "")
+    if not sym or not oid:
+        return jsonify(error="bad request: need symbol and id"), 400
+    deleted = opinion.delete_opinion(sym, oid)
+    return jsonify(deleted=deleted)
+
+
+RESTART_CODE = 42   # run.sh restarts the server when it exits with this code
+
+
+def _restart_exit(*_):
+    """Flush and exit with the sentinel code so the run.sh supervisor relaunches
+    us — same screen window, same command. A full process exit (rather than an
+    in-place execv) guarantees the listening socket is released, which execv does
+    not, since werkzeug keeps the socket inheritable. Triggered by SIGHUP
+    (kill -HUP / ./restart.sh) or POST /api/restart."""
+    try:
+        sys.stdout.flush(); sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(RESTART_CODE)
+
+
+@app.route("/api/restart", methods=["POST"])
+def api_restart():
+    # local-only: this bounces the whole server, so don't expose it remotely
+    if request.remote_addr not in ("127.0.0.1", "::1"):
+        return jsonify(error="forbidden"), 403
+    # delay so this response flushes before the process exits
+    threading.Timer(0.3, _restart_exit).start()
+    return jsonify(restarting=True, pid=os.getpid())
+
+
 @app.after_request
 def no_store(resp):
     # never let the browser serve cached market data; also skip caching the app's
@@ -640,6 +760,16 @@ def index():
 
 
 if __name__ == "__main__":
+    # SIGHUP -> exit with RESTART_CODE so run.sh relaunches: `kill -HUP <pid>`,
+    # `./restart.sh`, or POST /api/restart. (Run via ./run.sh for the restart to
+    # take effect; under a plain `python app.py` SIGHUP just stops the server.)
+    signal.signal(signal.SIGHUP, _restart_exit)
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "server.pid"), "w") as fh:
+            fh.write(str(os.getpid()))
+    except OSError:
+        pass
     start_scraper()   # background macrotrends refresh (<=1 req/min)
     # threaded: a slow /api/screener build must not block the dashboard endpoints
-    app.run(host="127.0.0.1", port=8050, debug=False, threaded=True)
+    app.run(host="127.0.0.1", port=int(os.environ.get("PORT", "8050")),
+            debug=False, threaded=True)
