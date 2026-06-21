@@ -26,6 +26,8 @@ Flask app.py  ──→ yfinance        (live: prices + .info)
         │     ──→ data/<sym>.json (macrotrends scrape + earnings cache)
         │     ──→ screener.py / backtest.py / opinion.py
         └──→ static/  (served at /, no-store so edits show on reload)
+
+build_universe.py ──(occasional)──→ universe.json ──(read at startup)──→ screener.py
 ```
 
 Flask does no templating — it serves the static front end and a set of JSON
@@ -58,15 +60,16 @@ and held only in short-lived in-memory caches:
   call per symbol, via `get_info` (keep-last-good: a transient empty `.info`
   never overwrites a good cache — this fixed descriptions vanishing).
 - **Screener metrics** (`screener.build_screener`) — one batched `yf.download`
-  of the universe + sector ETFs, then per-stock metrics; fundamentals
-  (`pe, ps, rev_g, earn_g, roe, margins, fcf, mktcap, …`) come from threaded
-  `.info` calls.
+  of the **universe** (~354 names from `universe.json` — see
+  [§3 screener.py & build_universe.py](#screenerpy--build_universepy)) + their
+  sector ETFs, then per-stock metrics; fundamentals (`pe, ps, rev_g, earn_g, roe,
+  margins, fcf, mktcap, …`) come from threaded `.info` calls.
 - **Backtest** and **reference overlays** and **earnings reactions** all read
   daily closes via `build(...)`.
 
 Meaning downstream: the Stocks grid, stats rows, Trade/Invest, Backtest and the
 reference overlays are **live and appear immediately** (subject to TTL caches and
-the ~30s first screener build).
+the ~30–40s first screener build over the ~354-name universe, cached 6h).
 
 ### 2b. macrotrends — background scrape, persisted to disk (valuation history)
 
@@ -359,6 +362,10 @@ ticker the UI has requested).
 shape): `{id, symbol, ts, profile, state, agents[], summary, log[], runs[], summary_md}`.
 
 **`server.pid`** — current server PID.
+
+**`universe.json`** (repo root, **committed** — not under `data/`) — the screener
+universe: `{min_cap, count, tickers: {ticker: ETF}}`, ~354 names, built by
+`build_universe.py` and read at runtime by `screener._load_universe()`.
 
 ---
 
