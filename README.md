@@ -86,7 +86,9 @@ full pipeline.
 
 ```
 app.py              Flask app: routes, caching, yfinance access, macrotrends scraper
-screener.py         universe (Nasdaq-100), IND map, price-based screener metrics
+screener.py         loads the universe (universe.json), price-based screener metrics
+build_universe.py   (re)builds universe.json from one Nasdaq snapshot + theme lists
+universe.json       committed universe: ~354 ticker→ETF map (read at runtime)
 backtest.py         vectorized TP/SL/hold backtest engine + Δ×hold sweep + Dickey-Fuller
 opinion.py          AI-opinion orchestration over local LLM CLIs (provider-agnostic)
 prompts/            opinion_agent.md, opinion_summary.md  (LLM prompt templates)
@@ -115,6 +117,9 @@ AI runs entirely through local CLIs on your own subscriptions.
 ## Notes
 
 - Yahoo's endpoint is unofficial; if data stops loading, `pip install -U yfinance` usually fixes it.
-- The universe is the **Nasdaq-100** (`screener.IND`), so NYSE names (e.g. ORCL)
-  won't appear in Trade/Invest/Earnings — but their detail pages still work.
+- The universe is **~354 names** — Nasdaq-100 ∪ software/SaaS (>$500M) ∪ game ∪
+  quantum stocks — built by `build_universe.py` into the committed `universe.json`
+  (one Nasdaq snapshot, no per-ticker throttling; rerun weekly to refresh).
+  Names outside it (e.g. most NYSE industrials) won't appear in Trade/Invest/
+  Earnings, but any ticker's detail page still works.
 - Intended for personal, low-volume use; no auth, bind to localhost / front with a proxy.

@@ -18,7 +18,9 @@ Metrics per stock:
           (negative = off-to-downside vs its group)
 """
 
+import json
 import math
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -32,8 +34,11 @@ IDIO_WINDOW = 60
 
 LOOKBACK_YEARS = {"1y": 1, "3y": 3, "5y": 5}
 
-# ticker -> industry/sector ETF (auto-seedable from yfinance .info later)
-IND = {
+# ticker -> industry/sector ETF benchmark (for the idiosyncratic metric).
+# NDX100_ETF is the precise, hand-curated Nasdaq-100 base; the full runtime
+# universe (IND) is loaded from universe.json (built by build_universe.py:
+# Nasdaq-100 + software/SaaS>$500M + games + quantum). Falls back to NDX100_ETF.
+NDX100_ETF = {
     "NVDA":"SOXX","AVGO":"SOXX","AMD":"SOXX","QCOM":"SOXX","TXN":"SOXX","AMAT":"SOXX",
     "MU":"SOXX","LRCX":"SOXX","ADI":"SOXX","KLAC":"SOXX","MRVL":"SOXX","NXPI":"SOXX",
     "MCHP":"SOXX","ON":"SOXX","ASML":"SOXX","SMCI":"SOXX",
@@ -54,6 +59,21 @@ IND = {
     "AAPL":"XLK","CSCO":"XLK",
 }
 
+def _load_universe():
+    """Runtime ticker->ETF map from universe.json (committed artifact built by
+    build_universe.py). Falls back to the Nasdaq-100 base if the file is absent."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "universe.json")
+    try:
+        with open(path) as fh:
+            tickers = json.load(fh).get("tickers")
+        if tickers:
+            return tickers
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return dict(NDX100_ETF)
+
+
+IND = _load_universe()
 UNIVERSES = {"ndx100": list(IND.keys())}
 
 # industry/sector ETF -> human label (kept in sync with the frontend's copy)

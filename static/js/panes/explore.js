@@ -70,7 +70,7 @@ function tradeEncode(stocks) {
     colorOf: (p) => p.drift == null ? GREY : rgbaFor(clamp01(1 - Math.abs(p.drift) / dscale)),
     radiusOf: (p) => {
       const v = p.vol == null ? vlo : p.vol;
-      return 4 + 12 * clamp01(vhi > vlo ? (v - vlo) / (vhi - vlo) : 0.5);
+      return 1 + 3 * clamp01(vhi > vlo ? (v - vlo) / (vhi - vlo) : 0.5);
     },
   };
 }
@@ -106,23 +106,23 @@ const TRADE_CONFIG = {
 
 const PANELS_INVEST = [
   { key: "moat", title: "[TL] Moat / returns on capital", xKey: "roe", yKey: "gross_m",
-    xLabel: "ROE (%)", yLabel: "Gross margin (%)",
-    good: { x: [15, null], y: [40, null] } },                       // top-right = moat
+    xLabel: "ROE (%, clipped 0–100)", yLabel: "Gross margin (%, clipped 0–100)",
+    good: { x: [15, null], y: [40, null] }, clipX: [0, 100], clipY: [0, 100] },   // top-right = moat
   { key: "cash", title: "[TR] Profit → cash", xKey: "op_m", yKey: "fcf_m",
-    xLabel: "Operating margin (%)", yLabel: "FCF margin (%)",
-    good: { x: [15, null], y: [10, null] } },                       // top-right = real cash
+    xLabel: "Operating margin (%, clipped −50…100)", yLabel: "FCF margin (%, clipped −50…100)",
+    good: { x: [15, null], y: [10, null] }, clipX: [-50, 100], clipY: [-50, 100] },  // top-right = real cash
   { key: "balance", title: "[ML] Balance sheet", xKey: "nd_ebitda", yKey: "curr",
-    xLabel: "Net debt / EBITDA (×, lower = better)", yLabel: "Current ratio",
-    good: { x: [null, 2], y: [1.5, null] }, clipX: [-5, 8] },       // top-LEFT = fortress
+    xLabel: "Net debt / EBITDA (×, clipped −5…8)", yLabel: "Current ratio (clipped 0–10)",
+    good: { x: [null, 2], y: [1.5, null] }, clipX: [-5, 8], clipY: [0, 10] },     // top-LEFT = fortress
   { key: "growthq", title: "[MR] Durable growth", xKey: "rev_g", yKey: "earn_g",
     xLabel: "Revenue growth YoY (%, clipped ±100)", yLabel: "Earnings growth YoY (%, clipped ±100)",
     good: { x: [8, null], y: [8, null] }, clipX: [-100, 100], clipY: [-100, 100] },
   { key: "owneryield", title: "[BL] Owner yield / value", xKey: "fcf_y", yKey: "earn_y",
-    xLabel: "FCF yield (%)", yLabel: "Earnings yield (%, = 1/PE)",
-    good: { x: [5, null], y: [5, null] } },                         // top-right = cheap cash
+    xLabel: "FCF yield (%, clipped ±20)", yLabel: "Earnings yield (%, = 1/PE, clipped 0–10)",
+    good: { x: [5, null], y: [5, null] }, clipX: [-20, 20], clipY: [0, 10] },     // top-right = cheap cash
   { key: "qualpx", title: "[BR] Quality vs price ★", xKey: "pe", yKey: "roe",
-    xLabel: "P/E (trailing, log)", yLabel: "ROE (%)",
-    good: { x: [null, 20], y: [20, null] }, logX: true },           // top-LEFT = great & cheap
+    xLabel: "P/E (trailing, log, clipped ≥5)", yLabel: "ROE (%, clipped 0–100)",
+    good: { x: [null, 20], y: [20, null] }, logX: true, clipX: [5, Infinity], clipY: [0, 100] },  // top-LEFT = great & cheap
 ];
 
 function investEncode(stocks) {
@@ -147,7 +147,7 @@ function investEncode(stocks) {
       return rgbaFor(parts.reduce((a, b) => a + b, 0) / parts.length);
     },
     radiusOf: (p) =>
-      (!(p.mktcap > 0) || cHi <= cLo) ? 6 : 4 + 12 * clamp01((Math.log(p.mktcap) - cLo) / (cHi - cLo)),
+      (!(p.mktcap > 0) || cHi <= cLo) ? 1.5 : 1 + 3 * clamp01((Math.log(p.mktcap) - cLo) / (cHi - cLo)),
   };
 }
 

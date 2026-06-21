@@ -133,11 +133,17 @@ The Flask app. Responsibilities:
 
 `_f(x)` is the JSON-safe float (NaN/inf → None) used everywhere.
 
-### screener.py
+### screener.py & build_universe.py
 
-Pure, price-based screener over a fixed universe.
+Pure, price-based screener over the configured universe.
 
-- `IND` — ticker → sector/industry ETF map; `UNIVERSES = {"ndx100": list(IND)}`.
+- **Universe** — `build_universe.py` makes one bulk request to the Nasdaq screener
+  API (whole market with sector/industry/marketCap, no per-ticker throttling) and
+  writes the committed **`universe.json`** = ticker→ETF map for
+  *Nasdaq-100 ∪ software/SaaS(>$500M) ∪ games ∪ quantum* (~354 names). Rerun it
+  weekly. `screener._load_universe()` reads it at runtime into `IND`, falling back
+  to the hand-curated `NDX100_ETF` (Nasdaq-100) if the file is missing.
+- `IND` — runtime ticker → ETF benchmark map; `UNIVERSES = {"ndx100": list(IND)}`.
 - Constants: `THRESHOLD=0.40` (zigzag), `BT_TP/BT_SL/BT_HOLD = 1.40/0.60/126`,
   `IDIO_WINDOW=60`, `LOOKBACK_YEARS`.
 - `build_screener(lookback, universe)` — one batched `yf.download` of universe +
