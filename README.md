@@ -1,82 +1,120 @@
-# Stocks
+# Stocks — a personal market dashboard
 
-A personal stock dashboard: a grid of Google-Finance-style price charts for
-the tickers you care about. Flask is a dumb gateway to `yfinance`; all the UI
-lives client-side (vanilla JS + [uPlot](https://github.com/leeoniya/uPlot)).
+A single-user web dashboard for watching, screening, backtesting and reading up
+on stocks. **Flask is a thin gateway**; all the UI is plain ES-module JavaScript
+with [uPlot](https://github.com/leeoniya/uPlot) and hand-rolled canvas charts —
+**no build step**. Live prices come from `yfinance`; valuation history is scraped
+from macrotrends in the background; AI opinions run through local LLM CLIs.
 
-## Features
+Deployed (for the author) at `stocks.bytepawn.com`; listens on `127.0.0.1:8050`.
 
-- Responsive grid of charts (default 9 stocks, 3×3), one per ticker.
-- Ranges: **1D / 1W / 1M / 3M / 6M / 1Y / 5Y**. Switching reloads all charts at once.
-- 1D shows **intraday** data with **pre/post-market in gray** and a dashed
-  **previous-close** baseline — like Google Finance.
-- Hover any chart → a **tracer line + price** appears on **every** chart at
-  the same time (synced crosshair, stays frozen on mouse-leave).
-- Toggle each chart's metric between **price / P/E / P/S** (P/E and P/S from
-  scraped quarterly fundamentals, anchored to the latest yfinance trailing values).
-- A per-chart snapshot row (open/high/low, market cap, P/E, 52-week range,
-  dividend) under each chart, Google-style.
-- Edit your ticker list in-page (stored in `localStorage`).
-- Mobile-friendly: toolbar stays frozen, charts scroll, ticker-jump nav chips.
+> Deep reference — Python/JS/CSS modules, the data pipeline, caching, file
+> formats — is in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
+## Views
+
+The left sidebar is a list of **panes** (each a `#/route`):
+
+- **Stocks** (`#/stocks`) — responsive grid of price charts for your watchlist.
+  Ranges 1D–5Y; metric toggle **price / P/E / P/S**; per-chart / shared y-axis
+  (Local/Global); a synced, freeze-on-leave crosshair with a horizontal price
+  line and above/below time-share; **Compare** dropdown to overlay "same $ into
+  SPY/QQQ/Gold/BTC/Mag-7/…"; **Full/Min** stats toggle; editable ticker list.
+- **Trade** (`#/explore`) — a 3×2 of linked scatter panels (macro-quadrant
+  boxes, log axes, clip arrows) to find **swingy, mean-reverting** names.
+- **Invest** (`#/invest`) — same machinery, **quality/value** axes (ROE, margins,
+  FCF, balance sheet, growth, P/E-vs-ROE) for WB/CM-style compounders.
+- **Earnings** (`#/earnings`) — recent + upcoming earnings across the universe
+  as a day-grouped list (EPS, market cap, last-4 beat/miss, sparkline, last-
+  report price reaction), with an expandable per-stock detail drawer.
+- **Stock detail** (`#/stock/<SYM>`) — 1×3 synced metric charts, an upswing
+  (zigzag) chart, quarterly financials, a header with stats/earnings/links, a
+  **Backtest** sub-tab, and an **AI Opinion** sub-tab.
+
+Trade, Invest and Earnings share one screener build and the same
+exchange / industry / MAG7 / profitable group filters + ticker search.
+
+A 🍀 "I'm feeling lucky" button opens a random universe stock; a sun/moon toggle
+switches light/dark. The sidebar is drag-resizable and collapsible.
 
 ## Run
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python app.py
+.venv/bin/python app.py            # http://127.0.0.1:8050   (override with PORT=)
 ```
 
-Listens on `127.0.0.1:8050` (override with the `PORT` env var).
+### Under a supervisor (restartable in place)
 
-### Running under a supervisor (restartable)
-
-To restart the server in place — handy when it lives in a long-lived `screen`
-session — launch it via the supervisor instead of calling `app.py` directly:
+For a long-lived deployment in `screen`, launch via the supervisor so the server
+can restart itself (handy when picking up new code):
 
 ```bash
 screen -S stocks ./run.sh
 ```
 
-`run.sh` relaunches the server whenever it exits with code `42`; any other exit
+`run.sh` relaunches the server whenever it exits with code **42**; any other exit
 (Ctrl-C, crash) stops the supervisor. Three ways to trigger a restart:
 
 ```bash
-./restart.sh                                 # reads server.pid, sends SIGHUP
-kill -HUP "$(cat server.pid)"                # same thing, by hand
-curl -X POST localhost:8050/api/restart      # local-only HTTP endpoint
+./restart.sh                              # reads server.pid, sends SIGHUP
+kill -HUP "$(cat server.pid)"             # same, by hand
+curl -X POST localhost:8050/api/restart   # local-only HTTP endpoint
 ```
 
-The server writes its PID to `server.pid` on startup. Restarts reuse the same
-`screen` window and launch command, so deployed code changes go live without
-re-attaching.
+## Where data comes from (the short version)
 
-## How data is fetched
+| Data | Source | When | Downstream |
+|---|---|---|---|
+| Price series, intraday | `yfinance` `yf.download` (live) | per request, cached by TTL | charts, screener, backtest, reference overlays, earnings reactions |
+| Snapshot stats, fundamentals, `.info` | `yfinance` `Ticker.info` (live) | per request, cached | stats rows, screener fundamentals, P/E·P/S anchors, profile |
+| Earnings dates / EPS | `yfinance` `get_earnings_dates` | cached 12h to `data/<sym>.json` | detail header, Earnings page |
+| P/E & P/S **history** | macrotrends scrape (TTM per-share) | background, ~1 page / 5s, daily | metric charts (price ÷ denominator at serve time) |
+| Quarterly revenue / net income | macrotrends scrape | background, daily | detail financials charts |
+| AI opinions | local `claude` / `codex` / `gemini`(`agy`) CLIs | on demand | AI Opinion sub-tab |
 
-- Two JSON endpoints:
-  - `GET /api/history?range=<r>&symbols=ADBE,META,...&metric=price|pe|ps`
-    — chart series for each symbol over the range.
-  - `GET /api/stats?symbols=ADBE,META,...` — per-symbol snapshot row
-    (open/high/low, market cap, P/E, 52-week high/low, dividend).
-- All symbols for a range are pulled in a **single** batched `yf.download` call.
-- Small in-memory TTL caches avoid re-hitting Yahoo when you toggle back.
-- A background thread scrapes macrotrends for quarterly P/E and P/S data at
-  1 req/min; page views never hit macrotrends directly.
+**Key consequence:** the macrotrends scraper only works through tickers the UI
+has asked about (`data/_symbols.json`), paced ~1 request / 5s. A freshly-opened
+stock therefore has **no P/E/P/S or quarterly financials until the scraper
+reaches it** — the detail page shows "loading…" and polls until it fills in.
+Everything price/`.info`-based (the grid, stats, screeners, backtest) is live and
+appears immediately. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the
+full pipeline.
 
-## explore_toy/
+## Repo layout
 
-Standalone Python/matplotlib scripts for exploring a future **Explore tab**
-(stock screener). Not part of the web app — run independently, output PNGs.
+```
+app.py              Flask app: routes, caching, yfinance access, macrotrends scraper
+screener.py         universe (Nasdaq-100), IND map, price-based screener metrics
+backtest.py         vectorized TP/SL/hold backtest engine + Δ×hold sweep + Dickey-Fuller
+opinion.py          AI-opinion orchestration over local LLM CLIs (provider-agnostic)
+prompts/            opinion_agent.md, opinion_summary.md  (LLM prompt templates)
+requirements.txt    Flask, yfinance, pandas, numpy, lxml
+run.sh / restart.sh supervisor + in-place restart
+static/             the whole front end (served at /)
+  index.html        shell: sidebar, content, CDN scripts (uPlot, marked, dompurify)
+  style.css         all styles + light/dark theme variables
+  js/               main.js, paneManager.js, api.js, util.js, filters.js, theme.js,
+                    chart.js, scatter.js, backtestcharts.js, panes/*.js
+explore_toy/        throwaway matplotlib scripts that prototyped the screener (not used by the app)
+data/               runtime cache (gitignored) — see below
+```
 
-- `toy_plots.py` — scatter plots of ~30 stocks: character (vol vs drift) and
-  timing (ripeness vs drawdown), colored by backtest return/win-rate.
-- `zigzag_viz.py` — visualizes the zigzag swing-counting algorithm on SMCI,
-  comparing a buggy non-alternating version vs the corrected alternating one.
-- `zigzag_nine.py` — corrected alternating zigzag for the 9 default stocks.
-- `zigzag_ndx_top9.py` — ranks all ~100 Nasdaq-100 stocks by confirmed
-  upswings (L→H ≥40% reversals, 3-year daily) and plots the top 9.
+## `data/` (runtime, gitignored)
+
+- `data/<sym>.json` — per-stock scraped/derived cache: `pe`, `ps`, `revenue`,
+  `netIncome` (each `{scraped_at, rows}`) and `earnings` (`{fetched_at, past[], next}`).
+- `data/_symbols.json` — every ticker the UI has requested (the scraper's worklist).
+- `data/opinions/<SYM>/<ts>.json` — saved AI-opinion runs.
+- `server.pid` — current PID (for `restart.sh`).
+
+`data/`, `server.pid` and `secrets.json` are gitignored. No API keys are used —
+AI runs entirely through local CLIs on your own subscriptions.
 
 ## Notes
 
 - Yahoo's endpoint is unofficial; if data stops loading, `pip install -U yfinance` usually fixes it.
-- Intended for personal, low-volume use.
+- The universe is the **Nasdaq-100** (`screener.IND`), so NYSE names (e.g. ORCL)
+  won't appear in Trade/Invest/Earnings — but their detail pages still work.
+- Intended for personal, low-volume use; no auth, bind to localhost / front with a proxy.
