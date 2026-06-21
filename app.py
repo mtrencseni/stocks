@@ -25,6 +25,7 @@ import time
 import urllib.error
 import urllib.request
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 
@@ -490,7 +491,7 @@ def fetch_earnings(sym):
                 past.append({"date": date, "epsEst": est, "epsActual": rep,
                              "surprisePct": _f(sur), "beat": beat})
             elif idx >= now and nxt is None:            # earliest future -> next report
-                nxt = {"date": date, "estimated": False}
+                nxt = {"date": date, "estimated": False, "epsEst": est}
         past = list(reversed(past))                     # most recent first (full window; header slices 4)
     if nxt is None:                                     # fall back to .info's single ts
         ts = get_info(sym).get("earningsTimestamp")
@@ -606,25 +607,116 @@ def financials():
     return jsonify(payload)
 
 
+def cached_screener(universe="ndx100", lookback="3y"):
+    """Screener payload, served from the shared cache (build on miss)."""
+    key = (universe, lookback)
+    now = time.time()
+    hit = _screener_cache.get(key)
+    if hit and now - hit[0] < SCREENER_TTL:
+        return hit[1]
+    payload = build_screener(lookback, universe)
+    _screener_cache[key] = (now, payload)
+    return payload
+
+
 @app.route("/api/screener")
 def screener():
     universe = request.args.get("universe", "ndx100")
     lookback = request.args.get("lookback", "3y")
     if lookback not in LOOKBACK_YEARS or universe not in UNIVERSES:
         return jsonify(error="bad request: need valid universe, lookback"), 400
-
-    key = (universe, lookback)
-    now = time.time()
-    hit = _screener_cache.get(key)
-    if hit and now - hit[0] < SCREENER_TTL:
-        return jsonify(hit[1])
-
     try:
-        payload = build_screener(lookback, universe)
+        return jsonify(cached_screener(universe, lookback))
     except Exception as exc:
         return jsonify(error=f"screener failed: {exc}"), 502
 
-    _screener_cache[key] = (now, payload)
+
+_calendar_cache = {}   # "calendar" -> (fetched_at, payload)
+CALENDAR_TTL = 1800
+
+
+def _reaction(ser, rd):
+    """Last-report price reaction from a (t, c) series: close on the report day,
+    next-day close (%), and now (%)."""
+    if not ser or not ser.get("c") or not rd:
+        return None
+    pairs = [(t, c) for t, c in zip(ser["t"], ser["c"]) if c is not None]
+    if len(pairs) < 2:
+        return None
+    ts = [p[0] for p in pairs]
+    cs = [p[1] for p in pairs]
+    try:
+        target = datetime.strptime(rd, "%Y-%m-%d").timestamp()
+    except (TypeError, ValueError):
+        return None
+    idx = min(range(len(ts)), key=lambda i: abs(ts[i] - target))
+    pre = cs[idx]
+    nxt = cs[idx + 1] if idx + 1 < len(cs) else None
+    now = cs[-1]
+    return {"date": rd, "pre": pre, "next": nxt,
+            "nextPct": ((nxt / pre - 1) * 100) if (nxt and pre) else None,
+            "now": now, "nowPct": ((now / pre - 1) * 100) if pre else None}
+
+
+@app.route("/api/calendar")
+def api_calendar():
+    """Recent + upcoming earnings across the universe, each joined with its
+    screener filter attributes (so the page reuses the same group filters +
+    search) and its last-report price reaction. Window of +/-3M (the widest UI
+    option); the frontend narrows by window/mode. Cached (batched price fetch)."""
+    now_t = time.time()
+    hit = _calendar_cache.get("calendar")
+    if hit and now_t - hit[0] < CALENDAR_TTL:
+        return jsonify(hit[1])
+    try:
+        rows = {r["sym"]: r for r in cached_screener()["stocks"]}
+    except Exception as exc:
+        return jsonify(error=f"calendar failed: {exc}"), 502
+    syms = list(rows.keys())
+    today = datetime.now(NY).date()
+    horizon = 95
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        earns = dict(zip(syms, ex.map(get_earnings, syms)))
+    try:
+        prices = build("1y", syms)["series"]   # one batched download for reactions
+    except Exception:
+        prices = {}
+
+    def days_out(ds):
+        try:
+            return (datetime.strptime(ds, "%Y-%m-%d").date() - today).days
+        except (TypeError, ValueError):
+            return None
+
+    out = []
+    for sym in syms:
+        r = rows[sym]
+        e = earns.get(sym) or {}
+        past_all = e.get("past") or []
+        hist = [p.get("beat") for p in past_all[:4]]   # last 4 reports, most-recent first
+        reaction = _reaction(prices.get(sym), past_all[0].get("date")) if past_all else None
+        attrs = {"sym": sym, "name": r.get("name", ""), "exchange": r.get("exchange", ""),
+                 "ind": r.get("ind"), "profitable": bool(r.get("profitable")), "hist": hist,
+                 "pe": r.get("pe"), "ps": r.get("ps"), "idio_z": r.get("idio_z"),
+                 "mktcap": r.get("mktcap"), "off52": r.get("off52"), "spark": r.get("spark"),
+                 "reaction": reaction}
+        for p in (e.get("past") or []):
+            d = days_out(p.get("date"))
+            if d is None or d > 0 or d < -horizon:
+                continue
+            out.append({**attrs, "date": p["date"], "days": d, "past": True,
+                        "beat": p.get("beat"), "surprisePct": p.get("surprisePct"),
+                        "epsEst": p.get("epsEst"), "epsActual": p.get("epsActual")})
+        nx = e.get("next")
+        if nx and nx.get("date"):
+            d = days_out(nx["date"])
+            if d is not None and 0 <= d <= horizon:
+                out.append({**attrs, "date": nx["date"], "days": d, "past": False,
+                            "estimated": bool(nx.get("estimated")), "epsEst": nx.get("epsEst")})
+    out.sort(key=lambda x: (x["date"], x["sym"]))
+    payload = {"asof": today.isoformat(), "entries": out}
+    _calendar_cache["calendar"] = (now_t, payload)
     return jsonify(payload)
 
 
@@ -774,6 +866,55 @@ def _reference_series(rng, tickers):
             out_t.append(d)
             rel.append(sum(vals) / len(vals))
     return out_t, rel
+
+
+@app.route("/api/earnings_detail")
+def api_earnings_detail():
+    """On-demand per-stock detail for an expanded Earnings row: price sparkline
+    since the last report, prev-report reaction (pre / next-day / now), 3y
+    above/below current price, and a 3y backtest capped at the current price."""
+    sym = request.args.get("symbol", "").strip().upper()
+    if not sym:
+        return jsonify(error="need symbol"), 400
+    t, c = _bt_series(sym, "3y")
+    if len(c) < 30:
+        return jsonify(error="not enough history"), 502
+    n = len(c)
+    now = c[-1]
+    above = sum(1 for v in c if v > now)
+    below = sum(1 for v in c if v < now)
+    bt = backtest.run_single(t, c, 0.4, 126, max_price=now).get("metrics") or {}
+
+    prev, spark = None, None
+    past = get_earnings(sym).get("past") or []
+    if past:
+        rd = past[0].get("date")
+        try:
+            target = datetime.strptime(rd, "%Y-%m-%d").timestamp()
+            idx = min(range(n), key=lambda i: abs(t[i] - target))
+        except (TypeError, ValueError):
+            idx = None
+        if idx is not None:
+            pre = c[idx]
+            nxt = c[idx + 1] if idx + 1 < n else None
+            prev = {"date": rd, "pre": pre, "next": nxt,
+                    "nextPct": ((nxt / pre - 1) * 100) if (nxt and pre) else None,
+                    "now": now, "nowPct": ((now / pre - 1) * 100) if pre else None}
+            spark = {"t": t[idx:], "c": c[idx:]}
+
+    pe = ps = idio = None
+    try:
+        row = {r["sym"]: r for r in cached_screener()["stocks"]}.get(sym)
+        if row:
+            pe, ps, idio = row.get("pe"), row.get("ps"), row.get("idio_z")
+    except Exception:
+        pass
+
+    return jsonify(symbol=sym, currentPrice=now,
+                   abovePct=above / n * 100, belowPct=below / n * 100,
+                   backtest={"win": bt.get("win"), "avg": bt.get("mean_ret"),
+                             "tradeRatio": bt.get("trade_ratio")},
+                   prev=prev, spark=spark, pe=pe, ps=ps, idio_z=idio)
 
 
 @app.route("/api/universe")

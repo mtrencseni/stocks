@@ -6,6 +6,7 @@ import { PaneManager } from "./paneManager.js";
 import { initTheme } from "./theme.js";
 import { StocksPane } from "./panes/stocks.js";
 import { ScreenerPane, SCREENER_CONFIGS } from "./panes/explore.js";
+import { CalendarPane } from "./panes/calendar.js";
 import { StockPane } from "./panes/stock.js";
 
 const content = document.getElementById("content");
@@ -17,6 +18,7 @@ const factories = {
   stocks:  () => new StocksPane({ onOpenStock: openStock }),
   explore: () => new ScreenerPane({ config: SCREENER_CONFIGS.explore, onOpenStock: openStock }),
   invest:  () => new ScreenerPane({ config: SCREENER_CONFIGS.invest, onOpenStock: openStock }),
+  calendar: () => new CalendarPane({ onOpenStock: openStock }),
   stock:   ({ symbol }) => new StockPane({ symbol }),
 };
 

@@ -112,9 +112,13 @@ export function prevCloseLine(value) {
 }
 
 // Google-style 3x3 stat grid (row-major matches the screenshot's column order)
-export function statsHTML(s) {
+export function statsHTML(s, minimal = false) {
   if (!s) return "";
-  const items = [
+  const items = minimal ? [
+    ["High", fmtPrice(s.high)],
+    ["Mkt cap", fmtCap(s.marketCap)],
+    ["P/E ratio", s.pe == null ? "—" : s.pe.toFixed(2)],
+  ] : [
     ["Open", fmtPrice(s.open)],
     ["Mkt cap", fmtCap(s.marketCap)],
     ["Dividend", s.divYield == null ? "—" : s.divYield.toFixed(2) + "%"],

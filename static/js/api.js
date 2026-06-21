@@ -20,6 +20,20 @@ export const REF_OPTIONS = [
   ["vti", "Vanguard Total US (VTI)"], ["vt", "Vanguard Total World (VT)"],
 ];
 
+export async function getEarningsDetail(symbol) {
+  const res = await fetch(`/api/earnings_detail?symbol=${encodeURIComponent(symbol)}`);
+  const json = await res.json();
+  if (json.error) throw new Error(json.error);
+  return json;
+}
+
+export async function getCalendar() {
+  const res = await fetch("/api/calendar");
+  const json = await res.json();
+  if (json.error) throw new Error(json.error);
+  return json;   // {asof, entries:[...]}
+}
+
 export async function getUniverse(universe) {
   const q = universe ? `?universe=${encodeURIComponent(universe)}` : "";
   const res = await fetch(`/api/universe${q}`);

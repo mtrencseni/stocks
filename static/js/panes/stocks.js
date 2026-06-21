@@ -28,7 +28,7 @@ export class StocksPane {
     this.closable = false;
     this.onOpenStock = opts.onOpenStock || (() => {});
     this.symbols = loadSymbols();
-    this.viewState = { range: "1d", metric: "price", yaxis: "per", compare: "" };  // in-memory
+    this.viewState = { range: "1d", metric: "price", yaxis: "per", compare: "", stats: "full" };  // in-memory
     this.cards = {};
     this.cross = new CrosshairGroup();
     this.lastSeries = null;
@@ -62,6 +62,10 @@ export class StocksPane {
         <div class="ranges" data-group="yaxis">
           <button data-yaxis="per">Local</button>
           <button data-yaxis="shared">Global</button>
+        </div>
+        <div class="ranges" data-group="stats">
+          <button data-stats="full">Full</button>
+          <button data-stats="min">Min</button>
         </div>
         <div class="ranges" data-group="compare">
           <select class="compare-select" title="Overlay: same $ invested in a reference">
@@ -104,6 +108,14 @@ export class StocksPane {
       this._syncToolbar();
       this.applyRender();   // re-render from cached data; no refetch, keeps the frozen pin
     });
+    this.root.querySelector('[data-group="stats"]').addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      this.viewState.stats = b.dataset.stats;
+      this._syncToolbar();
+      this._renderStats();   // re-render from cached stats; no refetch
+      this.resizeAll();      // stats row height changed -> re-fit charts
+    });
     const sel = this.root.querySelector(".compare-select");
     sel.addEventListener("change", async () => {
       this.viewState.compare = sel.value;
@@ -132,6 +144,9 @@ export class StocksPane {
       b.classList.toggle("active", b.dataset.metric === v.metric));
     this.root.querySelectorAll('[data-group="yaxis"] button').forEach((b) =>
       b.classList.toggle("active", b.dataset.yaxis === v.yaxis));
+    this.root.querySelectorAll('[data-group="stats"] button').forEach((b) =>
+      b.classList.toggle("active", b.dataset.stats === v.stats));
+    if (this.grid) this.grid.classList.toggle("stats-min", v.stats === "min");
   }
 
   onActivate() {
@@ -252,13 +267,19 @@ export class StocksPane {
 
   async fetchStats() {
     try {
-      const stats = await getStats(this.symbols);
-      for (const sym of this.symbols) {
-        const card = this.cards[sym];
-        if (card) card.statsEl.innerHTML = statsHTML(stats[sym]);
-      }
+      this.statsRaw = await getStats(this.symbols);
+      this._renderStats();
       this.resizeAll();   // stats row now occupies its space -> re-fit charts
     } catch (e) { /* stats are best-effort */ }
+  }
+
+  _renderStats() {
+    if (!this.statsRaw) return;
+    const min = this.viewState.stats === "min";
+    for (const sym of this.symbols) {
+      const card = this.cards[sym];
+      if (card) card.statsEl.innerHTML = statsHTML(this.statsRaw[sym], min);
+    }
   }
 
   renderStatus() {

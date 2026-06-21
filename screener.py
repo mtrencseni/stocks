@@ -220,7 +220,17 @@ def _metrics(sym, s, etf_series):
         "vol": _f(vol), "drift": _f(drift), "r2": _f(r2), "up": up,
         "off52": _f(off52), "dd": _f(dd), "above_lo": _f(above_lo),
         "bt_avg": _f(bt_avg), "bt_win": _f(bt_win), "idio_z": _f(idio_z),
+        "spark": _spark(arr),
     }
+
+
+def _spark(arr, pts=24, lookback=126):
+    """Downsampled recent price path (~last 6mo) for tiny row sparklines."""
+    a = arr[-lookback:]
+    if len(a) <= pts:
+        return [_f(x) for x in a]
+    step = len(a) / pts
+    return [_f(a[int(i * step)]) for i in range(pts)]
 
 
 def build_screener(lookback="3y", universe="ndx100"):

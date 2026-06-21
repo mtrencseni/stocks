@@ -247,6 +247,7 @@ export class StockPane {
     for (const k in this.finEls) if (this.finEls[k].chart) this.finEls[k].chart.destroy();
     if (this.zzChart) this.zzChart.destroy();
     if (this._btRO) this._btRO.disconnect();
+    clearTimeout(this._finTimer);
     cancelAnimationFrame(this._btRAF);
     for (const id in this.pollTimers) clearInterval(this.pollTimers[id]);
     if (this.root) this.root.remove();
@@ -761,7 +762,28 @@ export class StockPane {
     try {
       this.finData = await getFinancials(this.symbol);
       this._drawFinancials();
+      this._maybePollFinancials();
     } catch (e) { /* best-effort; the rest of the page still works */ }
+  }
+
+  // financials are macrotrends-scraped in the background; if a series isn't in
+  // yet, show "loading…" and re-fetch until it appears (or we give up).
+  _maybePollFinancials() {
+    const anyEmpty = FINANCIALS.some((f) => {
+      const s = this.finData && this.finData.series && this.finData.series[f.key];
+      return !s || !s.t || !s.t.length;
+    });
+    if (!anyEmpty) { this._finPolling = false; return; }
+    this._finTries = this._finTries || 0;
+    if (this._finTries >= 30) { this._finPolling = false; this._drawFinancials(); return; }  // ~10 min
+    this._finPolling = true;
+    this._drawFinancials();   // re-render so empty slots read "loading…"
+    clearTimeout(this._finTimer);
+    this._finTimer = setTimeout(async () => {
+      this._finTries++;
+      try { this.finData = await getFinancials(this.symbol); } catch (e) { /* keep trying */ }
+      this._maybePollFinancials();
+    }, 20000);
   }
 
   _drawFinancials() {
@@ -773,7 +795,7 @@ export class StockPane {
       const s = this.finData.series[f.key];
       if (!s || !s.t || !s.t.length) {                 // scraper hasn't filled this yet
         slot.card.classList.add("empty");
-        slot.chartEl.innerHTML = "no data yet";
+        slot.chartEl.innerHTML = this._finPolling ? "loading…" : "no data yet";
         if (slot.sub) slot.sub.textContent = "";
         continue;
       }

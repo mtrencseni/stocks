@@ -16,6 +16,7 @@ function idToHash(id) {
   if (id === "stocks") return "#/stocks";
   if (id === "explore") return "#/explore";
   if (id === "invest") return "#/invest";
+  if (id === "calendar") return "#/earnings";
   if (id.startsWith("stock:")) return "#/stock/" + id.slice("stock:".length);
   return "#/" + id;
 }
@@ -27,6 +28,7 @@ function hashToId(hash) {
   if (parts[0] === "stocks") return "stocks";
   if (parts[0] === "explore") return "explore";
   if (parts[0] === "invest") return "invest";
+  if (parts[0] === "earnings" || parts[0] === "calendar") return "calendar";
   return null;
 }
 
@@ -201,10 +203,11 @@ export class PaneManager {
     if (!this.find("stocks")) this.register(this._create("stocks"));
     if (!this.find("explore")) this.register(this._create("explore"));
     if (!this.find("invest")) this.register(this._create("invest"));
+    if (!this.find("calendar")) this.register(this._create("calendar"));
 
     // keep the fixed views in order at the top, stock panes (any order) below —
     // a newly-added singleton would otherwise land after restored stock panes
-    const rank = { stocks: 0, explore: 1, invest: 2 };
+    const rank = { stocks: 0, explore: 1, invest: 2, calendar: 3 };
     this.panes.sort((a, b) => (rank[a.id] ?? 9) - (rank[b.id] ?? 9));
 
     const fromHash = hashToId(location.hash);

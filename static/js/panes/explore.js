@@ -9,6 +9,9 @@
 // box and exchange/industry/profitable filters are shared machinery.
 
 import { ScatterChart } from "../scatter.js";
+import {
+  indLabel, escapeHTML, newFilters, matches, handleFilterClick, buildFilterChipsHTML,
+} from "../filters.js";
 
 // diverging "goodness" color: red (bad) -> yellow -> green (good)
 const RED = [236, 138, 130], YEL = [230, 210, 120], GREEN = [137, 201, 150];
@@ -30,21 +33,6 @@ function pct(arr, q) {
 }
 
 const LOOKBACKS = ["1y", "3y", "5y"];
-
-// curated set for the MAG7 filter chip (GOOG/GOOGL both, whichever the universe has)
-const MAG7 = new Set(["AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "NVDA", "META", "TSLA"]);
-
-// industry/sector ETF -> human label for the tooltip
-const IND_LABEL = {
-  SOXX: "Semiconductors", IGV: "Software/SaaS", XLC: "Internet/Media",
-  XLY: "Consumer/Retail", XLP: "Staples", XBI: "Biotech/Health",
-  XLI: "Industrials", XLK: "Tech/Hardware", IPAY: "Payments",
-  TAN: "Solar", XLE: "Energy", XLU: "Utilities", XLB: "Materials",
-};
-function indLabel(etf) {
-  if (!etf) return "";
-  return IND_LABEL[etf] ? `${IND_LABEL[etf]} (${etf})` : etf;
-}
 
 // ---------------------------------------------------------------------------
 // TRADE config — find swingy, mean-reverting speculation targets.
@@ -199,7 +187,7 @@ export class ScreenerPane {
     this.closable = false;
     this.onOpenStock = opts.onOpenStock || (() => {});
     this.viewState = { lookback: "3y" };   // in-memory, resets on reload
-    this.filters = { exchanges: new Set(), industries: new Set(), profitable: false, mag7: false };
+    this.filters = newFilters();
     this.charts = [];
     this.inited = false;
   }
@@ -277,21 +265,7 @@ export class ScreenerPane {
 
     this.filtersEl.addEventListener("click", (e) => {
       const b = e.target.closest("button");
-      if (!b) return;
-      if (b.dataset.clear) {
-        this.filters.exchanges.clear();
-        this.filters.industries.clear();
-        this.filters.profitable = false;
-        this.filters.mag7 = false;
-      } else if (b.dataset.prof) {
-        this.filters.profitable = !this.filters.profitable;
-      } else if (b.dataset.mag7) {
-        this.filters.mag7 = !this.filters.mag7;
-      } else if (b.dataset.group === "exchange") {
-        this._toggle(this.filters.exchanges, b.dataset.val);
-      } else if (b.dataset.group === "industry") {
-        this._toggle(this.filters.industries, b.dataset.val);
-      } else return;
+      if (!b || !handleFilterClick(this.filters, b)) return;
       this._buildFilterChips();
       this._applyFilters();
     });
@@ -423,44 +397,13 @@ export class ScreenerPane {
     this.resizeAll();
   }
 
-  // ---- filters ----
-
-  _toggle(set, val) { set.has(val) ? set.delete(val) : set.add(val); }
+  // ---- filters (shared machinery in filters.js) ----
 
   _buildFilterChips() {
-    const f = this.filters;
-    const exch = [...new Set(this.stocks.map((s) => s.exchange).filter(Boolean))].sort();
-    const inds = [...new Set(this.stocks.map((s) => s.ind).filter(Boolean))].sort();
-    const chip = (group, val, label, title, active) =>
-      `<button class="ef-chip${active ? " active" : ""}" data-group="${group}" ` +
-      `data-val="${escapeHTML(val)}"${title ? ` title="${escapeHTML(title)}"` : ""}>${escapeHTML(label)}</button>`;
-    const grp = (label, chips) =>
-      `<span class="ef-group"><span class="ef-label">${label}</span>${chips.join("")}</span>`;
-
-    let html = "";
-    if (exch.length)
-      html += grp("Exchange", exch.map((e) => chip("exchange", e, e, "", f.exchanges.has(e))));
-    if (inds.length)
-      html += grp("Industry", inds.map((i) =>
-        chip("industry", i, i, IND_LABEL[i] || i, f.industries.has(i))));
-    html += `<span class="ef-group">` +
-      `<button class="ef-chip ef-mag7${f.mag7 ? " active" : ""}" data-mag7="1" ` +
-      `title="Magnificent 7: AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA">MAG7</button>` +
-      `<button class="ef-chip ef-prof${f.profitable ? " active" : ""}" data-prof="1" ` +
-      `title="Only stocks with positive trailing earnings">Profitable</button></span>`;
-    const any = f.exchanges.size || f.industries.size || f.profitable || f.mag7;
-    if (any) html += `<button class="ef-clear" data-clear="1">Clear ✕</button>`;
-    this.filtersEl.innerHTML = html;
+    this.filtersEl.innerHTML = buildFilterChipsHTML(this.stocks, this.filters);
   }
 
-  _matches(s) {
-    const f = this.filters;
-    if (f.exchanges.size && !f.exchanges.has(s.exchange)) return false;
-    if (f.industries.size && !f.industries.has(s.ind)) return false;
-    if (f.profitable && !s.profitable) return false;
-    if (f.mag7 && !MAG7.has(s.sym)) return false;
-    return true;
-  }
+  _matches(s) { return matches(s, this.filters); }
 
   _applyFilters() {
     const shown = this.stocks.filter((s) => this._matches(s));
@@ -486,9 +429,4 @@ function fmtCap(v) {
   if (v >= 1e9) return `$${(v / 1e9).toFixed(1)}B`;
   if (v >= 1e6) return `$${(v / 1e6).toFixed(0)}M`;
   return `$${v}`;
-}
-
-function escapeHTML(s) {
-  return (s || "").replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
