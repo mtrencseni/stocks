@@ -3,6 +3,7 @@
 // Bootstrap: wire the pane factories to the manager and boot the shell.
 
 import { PaneManager } from "./paneManager.js";
+import { initTheme } from "./theme.js";
 import { StocksPane } from "./panes/stocks.js";
 import { ScreenerPane, SCREENER_CONFIGS } from "./panes/explore.js";
 import { StockPane } from "./panes/stock.js";
@@ -19,8 +20,55 @@ const factories = {
   stock:   ({ symbol }) => new StockPane({ symbol }),
 };
 
+initTheme();   // apply saved light/dark before first render
 manager = new PaneManager({ content, sidebar, factories });
 manager.boot();
+
+// redraw the active pane's canvas charts when the theme flips
+window.addEventListener("themechange", () => {
+  const p = manager && manager.find(manager.activeId);
+  if (p && p.resizeAll) p.resizeAll();
+});
+
+// ---- sidebar: drag-to-resize + show/hide (macOS-style) ----
+const refit = () => {
+  const p = manager && manager.find(manager.activeId);
+  if (p && p.resizeAll) requestAnimationFrame(() => p.resizeAll());
+};
+const sidebarEl = document.getElementById("sidebar");
+const resizerEl = document.getElementById("sidebar-resizer");
+const sbToggleEl = document.getElementById("sidebarToggle");
+
+const savedW = parseInt(localStorage.getItem("sidebarW") || "", 10);
+if (savedW >= 150 && savedW <= 420) sidebarEl.style.flex = `0 0 ${savedW}px`;
+if (localStorage.getItem("sidebarCollapsed") === "1") document.body.classList.add("sidebar-collapsed");
+
+sbToggleEl.addEventListener("click", () => {
+  const collapsed = document.body.classList.toggle("sidebar-collapsed");
+  localStorage.setItem("sidebarCollapsed", collapsed ? "1" : "0");
+  refit();
+});
+
+let dragging = false;
+resizerEl.addEventListener("mousedown", (e) => {
+  dragging = true;
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+  e.preventDefault();
+});
+window.addEventListener("mousemove", (e) => {
+  if (!dragging) return;
+  const w = Math.max(150, Math.min(420, e.clientX));
+  sidebarEl.style.flex = `0 0 ${w}px`;
+});
+window.addEventListener("mouseup", () => {
+  if (!dragging) return;
+  dragging = false;
+  document.body.style.cursor = "";
+  document.body.style.userSelect = "";
+  localStorage.setItem("sidebarW", String(sidebarEl.offsetWidth));
+  refit();
+});
 
 // re-fit the active pane's charts on window resize
 let resizeTimer;

@@ -23,6 +23,12 @@ function hidePin(card) {
   if (card.vline) card.vline.style.display = "none";
   if (card.dot) card.dot.style.display = "none";
   if (card.tip) card.tip.style.display = "none";
+  hideHline(card);
+}
+
+function hideHline(card) {
+  if (card.hline) card.hline.style.display = "none";
+  if (card.pcts) for (const k in card.pcts) card.pcts[k].style.display = "none";
 }
 
 // draw the crosshair on one chart at the group's pinXval
@@ -36,15 +42,68 @@ function renderPin(card, group) {
   card.vline.style.display = "block";
 
   const val = u.data[card.priceIdx][idx];
-  if (val == null) { card.dot.style.display = "none"; card.tip.style.display = "none"; return; }
+  if (val == null) { card.dot.style.display = "none"; card.tip.style.display = "none"; hideHline(card); return; }
+  const yPos = u.valToPos(val, "y");
   card.dot.style.left = left + "px";
-  card.dot.style.top = u.valToPos(val, "y") + "px";
+  card.dot.style.top = yPos + "px";
   card.dot.style.display = "block";
   card.tip.innerHTML =
     `<b>${metricLabel(card.metric)} = ${fmtVal(card.metric, val)}</b>` +
     `<span class="t">${fmtTime(card.times[idx], card.range)}</span>`;
   card.tip.style.left = left + "px";
   card.tip.style.display = "block";
+
+  // horizontal price line + how much of the time the stock sat above/below this
+  // price, split before vs after the cursor. $ price charts only.
+  if (card.metric !== "price") { hideHline(card); return; }
+  card.hline.style.top = yPos + "px";
+  card.hline.style.display = "block";
+  const arr = u.data[card.priceIdx];
+  let bAbove = 0, bBelow = 0, bTot = 0, aAbove = 0, aBelow = 0, aTot = 0;
+  for (let k = 0; k < arr.length; k++) {
+    const v = arr[k];
+    if (v == null || k === idx) continue;
+    if (k < idx) { bTot++; if (v > val) bAbove++; else if (v < val) bBelow++; }
+    else { aTot++; if (v > val) aAbove++; else if (v < val) aBelow++; }
+  }
+  const pf = (num, den) => den ? Math.round(num / den * 100) + "%" : "—";
+  card.pcts.ba.textContent = pf(bAbove, bTot);
+  card.pcts.bb.textContent = pf(bBelow, bTot);
+  card.pcts.aa.textContent = pf(aAbove, aTot);
+  card.pcts.ab.textContent = pf(aBelow, aTot);
+  for (const k in card.pcts) {
+    card.pcts[k].style.top = yPos + "px";
+    card.pcts[k].style.display = "block";
+  }
+}
+
+// keep the compare dropdown + clear button in sync: first option reads "Hide"
+// when a reference is active (so re-picking it removes), and the X shows only then.
+export function syncCompareUI(selectEl, clearBtn, value) {
+  if (selectEl.options.length) selectEl.options[0].textContent = value ? "Hide" : "Compare…";
+  selectEl.value = value || "";
+  if (clearBtn) clearBtn.hidden = !value;
+}
+
+// turn a reference {t, rel} into a per-bar "same $" overlay aligned to a price
+// series, anchored to the series' first point. null if not computable.
+export function refOverlay(refData, series) {
+  if (!refData || !refData.t.length || !series || !series.c) return null;
+  const ymd = (ts) => new Date(ts * 1000).toISOString().slice(0, 10);
+  const refMap = {};
+  for (let i = 0; i < refData.t.length; i++) refMap[ymd(refData.t[i])] = refData.rel[i];
+  const start = series.c.find((v) => v != null);
+  if (start == null) return null;
+  const arr = new Array(series.c.length).fill(null);
+  let lastRel = null, base = null;
+  for (let i = 0; i < series.t.length; i++) {
+    const r = refMap[ymd(series.t[i])];
+    if (r != null) lastRel = r;
+    if (series.c[i] == null) continue;
+    if (base == null) { if (lastRel == null) continue; base = lastRel; }
+    if (lastRel != null) arr[i] = start * lastRel / base;
+  }
+  return arr;
 }
 
 // build the card DOM and return its handle object
@@ -73,7 +132,7 @@ export function buildCard(sym) {
 
 // (re)render a card's chart from a series object. opts: {range, metric, series, yRange, group}
 export function renderCard(card, opts) {
-  const { range, metric, series: s, yRange, group } = opts;
+  const { range, metric, series: s, yRange, group, overlay } = opts;
 
   if (card.chart) {
     card.chart.destroy();
@@ -126,8 +185,18 @@ export function renderCard(card, opts) {
   } else {
     // ordinal axis: x = bar index, so overnight/weekend gaps collapse
     const xs = s.t.map((_, i) => i);
-    data = [xs, s.c];
-    seriesOpt = [{}, { stroke: col, width: 2, fill: makeFill(col), points: { show: false } }];
+    const mainOpt = { stroke: col, width: 2, fill: makeFill(col), points: { show: false } };
+    if (overlay && overlay.length === s.c.length) {
+      // "same $ into X" reference as a faint dashed background line, drawn first
+      const refOpt = { stroke: "rgba(170,173,183,0.6)", width: 1.5, dash: [5, 4], points: { show: false } };
+      data = [xs, overlay, s.c];
+      seriesOpt = [{}, refOpt, mainOpt];
+      card.priceIdx = 2;
+    } else {
+      data = [xs, s.c];
+      seriesOpt = [{}, mainOpt];
+      card.priceIdx = 1;
+    }
     xScale = { time: false };
     const ticks = dayTickSplits(s.t, 4);
     xAxis = { ...xAxisBase, splits: () => ticks, values: ordinalValues(s.t) };
@@ -158,10 +227,16 @@ export function renderCard(card, opts) {
   // crosshair overlay lives in the plotting area so coords map directly
   const over = card.chart.over;
   const vline = document.createElement("div"); vline.className = "vline";
+  const hline = document.createElement("div"); hline.className = "hline";
   const dot = document.createElement("div"); dot.className = "dot";
   const tip = document.createElement("div"); tip.className = "tip";
-  over.append(vline, dot, tip);
-  card.vline = vline; card.dot = dot; card.tip = tip;
+  const mkPct = (cls) => { const d = document.createElement("div"); d.className = "pct " + cls; return d; };
+  const pcts = {
+    ba: mkPct("pct-above pct-left"), bb: mkPct("pct-below pct-left"),   // before
+    aa: mkPct("pct-above pct-right"), ab: mkPct("pct-below pct-right"),  // after
+  };
+  over.append(vline, hline, dot, tip, pcts.ba, pcts.bb, pcts.aa, pcts.ab);
+  card.vline = vline; card.hline = hline; card.dot = dot; card.tip = tip; card.pcts = pcts;
 
   // moving over any chart updates the shared pin; leaving keeps it frozen
   over.addEventListener("mousemove", (e) => {

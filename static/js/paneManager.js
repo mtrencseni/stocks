@@ -7,6 +7,9 @@
 //   - VIEW CONFIG (inside each pane's in-memory viewState): NOT persisted, so it
 //     survives pane switches but resets to defaults on reload.
 
+import { makeThemeToggle } from "./theme.js";
+import { getUniverse } from "./api.js";
+
 const SESSION_KEY = "session.v1";
 
 function idToHash(id) {
@@ -134,6 +137,38 @@ export class PaneManager {
       }
       this.sidebar.appendChild(item);
     }
+
+    const spacer = document.createElement("div");
+    spacer.className = "side-spacer";
+    this.sidebar.appendChild(spacer);
+    const footer = document.createElement("div");   // shamrock (left) + theme toggle (right)
+    footer.className = "side-footer";
+    footer.appendChild(this._makeLucky());
+    footer.appendChild(makeThemeToggle());
+    this.sidebar.appendChild(footer);
+  }
+
+  _makeLucky() {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "lucky-btn";
+    b.title = "I'm feeling lucky — open a random stock";
+    b.textContent = "🍀";
+    b.addEventListener("click", () => this._openLucky());
+    return b;
+  }
+
+  // open a random universe stock that isn't already open
+  async _openLucky() {
+    if (!this._universe) {
+      try { this._universe = await getUniverse(); } catch (e) { this._universe = []; }
+    }
+    const open = new Set(this.panes.filter((p) => p.type === "stock").map((p) => p.symbol));
+    const pool = this._universe.filter((s) => !open.has(s));
+    const list = pool.length ? pool : this._universe;   // all open? then any
+    if (!list.length) return;
+    const sym = list[Math.floor(Math.random() * list.length)];
+    this.open(this._create("stock", sym));
   }
 
   persist() {

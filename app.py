@@ -34,6 +34,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from screener import build_screener, LOOKBACK_YEARS, UNIVERSES, segment_label
 import opinion
+import backtest
 
 warnings.filterwarnings("ignore")
 
@@ -716,6 +717,156 @@ def opinion_delete():
         return jsonify(error="bad request: need symbol and id"), 400
     deleted = opinion.delete_opinion(sym, oid)
     return jsonify(deleted=deleted)
+
+
+# ----------------------------------------------------------------------------
+# Reference overlays: "same $ into X" comparison lines for the Stocks grid
+# ----------------------------------------------------------------------------
+
+REFERENCES = {
+    "spy":   {"label": "S&P 500 (SPY)",             "tickers": ["SPY"]},
+    "qqq":   {"label": "Nasdaq 100 (QQQ)",          "tickers": ["QQQ"]},
+    "gld":   {"label": "Gold (GLD)",                "tickers": ["GLD"]},
+    "btc":   {"label": "Bitcoin (BTC-USD)",         "tickers": ["BTC-USD"]},
+    "googl": {"label": "Google (GOOGL)",            "tickers": ["GOOGL"]},
+    "nvda":  {"label": "Nvidia (NVDA)",             "tickers": ["NVDA"]},
+    "brkb":  {"label": "Berkshire (BRK-B)",         "tickers": ["BRK-B"]},
+    "mag7":  {"label": "Magnificent 7 (equal-wt)",
+              "tickers": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"]},
+    "vti":   {"label": "Vanguard Total US (VTI)",   "tickers": ["VTI"]},
+    "vt":    {"label": "Vanguard Total World (VT)",  "tickers": ["VT"]},
+}
+
+_ref_cache = {}    # (range, key) -> (fetched_at, payload)
+REF_TTL = 3600
+
+
+def _reference_series(rng, tickers):
+    """Equal-weight, start-normalized relative series (rel[0]=1) for one or more
+    tickers, aligned by date with per-ticker forward-fill. Single ticker -> just
+    its close/close[0]; basket -> mean of each member's normalized path."""
+    s = build(rng, tickers)["series"]
+    maps, all_dates = {}, set()
+    for tk in tickers:
+        ser = s.get(tk)
+        if not ser:
+            continue
+        m = {t: c for t, c in zip(ser["t"], ser["c"]) if c is not None}
+        if m:
+            maps[tk] = m
+            all_dates |= set(m.keys())
+    if not maps:
+        return [], []
+    last = {tk: None for tk in maps}
+    first = {tk: None for tk in maps}
+    out_t, rel = [], []
+    for d in sorted(all_dates):
+        vals = []
+        for tk, m in maps.items():
+            if d in m:
+                last[tk] = m[d]
+            if last[tk] is None:
+                continue
+            if first[tk] is None:
+                first[tk] = last[tk]
+            vals.append(last[tk] / first[tk])
+        if vals:
+            out_t.append(d)
+            rel.append(sum(vals) / len(vals))
+    return out_t, rel
+
+
+@app.route("/api/universe")
+def api_universe():
+    u = request.args.get("universe", "ndx100")
+    return jsonify(symbols=UNIVERSES.get(u, UNIVERSES["ndx100"]))
+
+
+@app.route("/api/reference")
+def api_reference():
+    rng = request.args.get("range", "")
+    key = request.args.get("ref", "")
+    if rng not in RANGES or rng == "1d":
+        return jsonify(error="bad range (1d unsupported)"), 400
+    if key not in REFERENCES:
+        return jsonify(error="unknown reference"), 400
+    now = time.time()
+    hit = _ref_cache.get((rng, key))
+    if hit and now - hit[0] < REF_TTL:
+        return jsonify(hit[1])
+    t, rel = _reference_series(rng, REFERENCES[key]["tickers"])
+    payload = {"ref": key, "label": REFERENCES[key]["label"], "range": rng, "t": t, "rel": rel}
+    _ref_cache[(rng, key)] = (now, payload)
+    return jsonify(payload)
+
+
+# ----------------------------------------------------------------------------
+# Backtest tab: per-stock strategy sweep + drill-down
+# ----------------------------------------------------------------------------
+
+BT_RANGES = ("1y", "3y", "5y")
+_bt_series_cache = {}   # (sym, rng) -> (fetched_at, (t_list, c_list))
+_bt_sweep_cache = {}    # (sym, rng, max_price) -> (fetched_at, payload)
+BT_SERIES_TTL = 3600
+
+
+def _bt_series(sym, rng):
+    """Daily (t, close) arrays for one symbol over a backtest range, cached."""
+    now = time.time()
+    key = (sym, rng)
+    hit = _bt_series_cache.get(key)
+    if hit and now - hit[0] < BT_SERIES_TTL:
+        return hit[1]
+    s = build(rng, [sym])["series"].get(sym)
+    t, c = [], []
+    if s:
+        for ts, cv in zip(s["t"], s["c"]):
+            if cv is not None:
+                t.append(ts); c.append(cv)
+    _bt_series_cache[key] = (now, (t, c))
+    return t, c
+
+
+@app.route("/api/backtest")
+def api_backtest():
+    sym = request.args.get("symbol", "").strip().upper()
+    rng = request.args.get("range", "3y")
+    if not sym or rng not in BT_RANGES:
+        return jsonify(error="bad request: need symbol and range in 1y/3y/5y"), 400
+    try:
+        delta = float(request.args.get("delta", "0.4"))
+        hold = int(request.args.get("hold", "126"))
+    except ValueError:
+        return jsonify(error="bad delta/hold"), 400
+    max_price = _f(request.args.get("max_price"))   # None if absent/blank
+    t, c = _bt_series(sym, rng)
+    if len(c) < 60:
+        return jsonify(error="not enough price history"), 502
+    res = backtest.run_single(t, c, delta, hold, max_price)
+    res.update(symbol=sym, range=rng, last_price=c[-1])
+    return jsonify(res)
+
+
+@app.route("/api/backtest/sweep")
+def api_backtest_sweep():
+    sym = request.args.get("symbol", "").strip().upper()
+    rng = request.args.get("range", "3y")
+    if not sym or rng not in BT_RANGES:
+        return jsonify(error="bad request: need symbol and range in 1y/3y/5y"), 400
+    max_price = _f(request.args.get("max_price"))
+    now = time.time()
+    key = (sym, rng, max_price)
+    hit = _bt_sweep_cache.get(key)
+    if hit and now - hit[0] < BT_SERIES_TTL:
+        return jsonify(hit[1])
+    t, c = _bt_series(sym, rng)
+    if len(c) < 60:
+        return jsonify(error="not enough price history"), 502
+    payload = {"symbol": sym, "range": rng, "max_price": max_price,
+               "last_price": c[-1], "sweep": backtest.run_sweep(c, max_price),
+               "df": backtest.dickey_fuller(c)}
+    _bt_sweep_cache[key] = (now, payload)
+    return jsonify(payload)
 
 
 RESTART_CODE = 42   # run.sh restarts the server when it exits with this code

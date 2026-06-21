@@ -31,6 +31,9 @@ function pct(arr, q) {
 
 const LOOKBACKS = ["1y", "3y", "5y"];
 
+// curated set for the MAG7 filter chip (GOOG/GOOGL both, whichever the universe has)
+const MAG7 = new Set(["AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "NVDA", "META", "TSLA"]);
+
 // industry/sector ETF -> human label for the tooltip
 const IND_LABEL = {
   SOXX: "Semiconductors", IGV: "Software/SaaS", XLC: "Internet/Media",
@@ -196,7 +199,7 @@ export class ScreenerPane {
     this.closable = false;
     this.onOpenStock = opts.onOpenStock || (() => {});
     this.viewState = { lookback: "3y" };   // in-memory, resets on reload
-    this.filters = { exchanges: new Set(), industries: new Set(), profitable: false };
+    this.filters = { exchanges: new Set(), industries: new Set(), profitable: false, mag7: false };
     this.charts = [];
     this.inited = false;
   }
@@ -222,12 +225,12 @@ export class ScreenerPane {
         ${cfg.panels.map((p) => `<div class="explore-cell" data-cell="${p.key}"></div>`).join("")}
       </main>
       <footer class="explore-legend">
+        <button class="legend-bar" type="button">Metrics <span class="legend-caret">▴</span></button>
         <div class="legend-grid">
           ${cfg.legend.map(([term, tag, desc]) =>
             `<p><b>${term}</b> <i>(${tag})</i> — ${desc}</p>`).join("")}
         </div>
-      </footer>
-      <button class="legend-toggle" aria-label="What do these mean?">?</button>`;
+      </footer>`;
     container.appendChild(root);
     this.root = root;
     this.statusEl = root.querySelector(".status");
@@ -279,8 +282,11 @@ export class ScreenerPane {
         this.filters.exchanges.clear();
         this.filters.industries.clear();
         this.filters.profitable = false;
+        this.filters.mag7 = false;
       } else if (b.dataset.prof) {
         this.filters.profitable = !this.filters.profitable;
+      } else if (b.dataset.mag7) {
+        this.filters.mag7 = !this.filters.mag7;
       } else if (b.dataset.group === "exchange") {
         this._toggle(this.filters.exchanges, b.dataset.val);
       } else if (b.dataset.group === "industry") {
@@ -297,10 +303,12 @@ export class ScreenerPane {
       this._syncToolbar();
       this.load();
     });
-    root.querySelector(".legend-toggle").addEventListener("click", () =>
-      root.classList.toggle("legend-open"));
-    root.querySelector(".explore-legend").addEventListener("click", () =>
-      root.classList.remove("legend-open"));
+    // legend is a collapsible drawer: the "Metrics" bar expands/hides it.
+    // toggling resizes the grid, so re-fit the charts to the new height.
+    root.querySelector(".legend-bar").addEventListener("click", () => {
+      root.classList.toggle("legend-open");
+      requestAnimationFrame(() => this.resizeAll());
+    });
     this._syncToolbar();
   }
 
@@ -436,9 +444,11 @@ export class ScreenerPane {
       html += grp("Industry", inds.map((i) =>
         chip("industry", i, i, IND_LABEL[i] || i, f.industries.has(i))));
     html += `<span class="ef-group">` +
+      `<button class="ef-chip ef-mag7${f.mag7 ? " active" : ""}" data-mag7="1" ` +
+      `title="Magnificent 7: AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA">MAG7</button>` +
       `<button class="ef-chip ef-prof${f.profitable ? " active" : ""}" data-prof="1" ` +
       `title="Only stocks with positive trailing earnings">Profitable</button></span>`;
-    const any = f.exchanges.size || f.industries.size || f.profitable;
+    const any = f.exchanges.size || f.industries.size || f.profitable || f.mag7;
     if (any) html += `<button class="ef-clear" data-clear="1">Clear ✕</button>`;
     this.filtersEl.innerHTML = html;
   }
@@ -448,6 +458,7 @@ export class ScreenerPane {
     if (f.exchanges.size && !f.exchanges.has(s.exchange)) return false;
     if (f.industries.size && !f.industries.has(s.ind)) return false;
     if (f.profitable && !s.profitable) return false;
+    if (f.mag7 && !MAG7.has(s.sym)) return false;
     return true;
   }
 

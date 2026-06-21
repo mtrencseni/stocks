@@ -11,7 +11,14 @@
 </head>
 <body>
   <button id="menuBtn" aria-label="Menu">☰</button>
+  <button id="sidebarToggle" aria-label="Show/hide sidebar" title="Show/hide sidebar">
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">
+      <rect x="3" y="5" width="18" height="14" rx="2"/>
+      <line x1="9.5" y1="5" x2="9.5" y2="19"/>
+    </svg>
+  </button>
   <aside id="sidebar"></aside>
+  <div id="sidebar-resizer"></div>
   <div id="content"></div>
 
   <script src="https://unpkg.com/uplot@1.6.31/dist/uPlot.iife.min.js"></script>

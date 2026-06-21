@@ -2,8 +2,8 @@
 
 // The original dashboard: a responsive grid of charts, now a Pane.
 
-import { getHistory, getStats } from "../api.js";
-import { buildCard, renderCard, CrosshairGroup } from "../chart.js";
+import { getHistory, getStats, getReference, REF_OPTIONS } from "../api.js";
+import { buildCard, renderCard, refOverlay, syncCompareUI, CrosshairGroup } from "../chart.js";
 import { statsHTML, isMobile } from "../util.js";
 
 const DEFAULT_SYMBOLS =
@@ -28,10 +28,12 @@ export class StocksPane {
     this.closable = false;
     this.onOpenStock = opts.onOpenStock || (() => {});
     this.symbols = loadSymbols();
-    this.viewState = { range: "1d", metric: "price", yaxis: "per" };  // in-memory, resets on reload
+    this.viewState = { range: "1d", metric: "price", yaxis: "per", compare: "" };  // in-memory
     this.cards = {};
     this.cross = new CrosshairGroup();
     this.lastSeries = null;
+    this.refData = null;     // {t, rel} for the selected reference
+    this.overlays = {};      // sym -> per-bar "same $" overlay array
     this.updatedAt = null;
     this.inited = false;
     this.statusTimer = null;
@@ -60,6 +62,12 @@ export class StocksPane {
         <div class="ranges" data-group="yaxis">
           <button data-yaxis="per">Local</button>
           <button data-yaxis="shared">Global</button>
+        </div>
+        <div class="ranges" data-group="compare">
+          <select class="compare-select" title="Overlay: same $ invested in a reference">
+            <option value="">Compare…</option>
+            ${REF_OPTIONS.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}
+          </select>
         </div>
         <div class="tb-right">
           <span class="status"></span>
@@ -96,6 +104,14 @@ export class StocksPane {
       this._syncToolbar();
       this.applyRender();   // re-render from cached data; no refetch, keeps the frozen pin
     });
+    const sel = this.root.querySelector(".compare-select");
+    sel.addEventListener("change", async () => {
+      this.viewState.compare = sel.value;
+      syncCompareUI(sel, null, this.viewState.compare);
+      await this._loadCompare();
+      this.applyRender();
+    });
+    syncCompareUI(sel, null, this.viewState.compare);
     this.root.querySelector('[data-act="edit"]').addEventListener("click", () => this._editSymbols());
     this.nav.addEventListener("click", (e) => {
       const b = e.target.closest("button");
@@ -171,6 +187,7 @@ export class StocksPane {
     this.cross.reset();   // a frozen crosshair from a different range/metric doesn't map cleanly
     try {
       this.lastSeries = await getHistory(range, this.viewState.metric, this.symbols);
+      await this._loadCompare();   // reference depends on range/metric
       this.applyRender();
       this.updatedAt = Date.now();
       this.renderStatus();
@@ -187,12 +204,12 @@ export class StocksPane {
     let yRange = null;
     if (this.viewState.yaxis === "shared") {
       let mn = Infinity, mx = -Infinity;
+      const eat = (v) => { if (v != null) { if (v < mn) mn = v; if (v > mx) mx = v; } };
       for (const sym of this.symbols) {
         const s = series[sym];
-        if (!s || !s.c) continue;
-        for (const v of s.c) {
-          if (v != null) { if (v < mn) mn = v; if (v > mx) mx = v; }
-        }
+        if (s && s.c) for (const v of s.c) eat(v);
+        const ov = this.overlays[sym];               // include the overlay so it isn't clipped
+        if (ov) for (const v of ov) eat(v);
       }
       if (mn <= mx) {
         const pad = (mx - mn) * 0.05 || Math.abs(mx) * 0.05 || 1;
@@ -205,11 +222,32 @@ export class StocksPane {
       const card = this.cards[sym];
       renderCard(card, {
         range: this.viewState.range, metric: this.viewState.metric,
-        series: series[sym], yRange, group: this.cross,
+        series: series[sym], yRange, group: this.cross, overlay: this.overlays[sym] || null,
       });
       this.cross.cards.push(card);
     }
     this.cross.renderAll();
+  }
+
+  // fetch the selected reference and turn it into a per-stock "same $" overlay
+  async _loadCompare() {
+    const v = this.viewState;
+    this.overlays = {};
+    this.refData = null;
+    if (!v.compare || v.metric !== "price" || v.range === "1d") return;
+    try {
+      this.refData = await getReference(v.range, v.compare);
+    } catch (e) { this.refData = null; return; }
+    this._computeOverlays();
+  }
+
+  _computeOverlays() {
+    this.overlays = {};
+    if (!this.refData) return;
+    for (const sym of this.symbols) {
+      const ov = refOverlay(this.refData, this.lastSeries && this.lastSeries[sym]);
+      if (ov) this.overlays[sym] = ov;
+    }
   }
 
   async fetchStats() {

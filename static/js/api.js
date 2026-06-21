@@ -12,6 +12,29 @@ export async function getHistory(range, metric, symbols) {
   return json.series;
 }
 
+// reference overlay options (keys match app.py REFERENCES)
+export const REF_OPTIONS = [
+  ["spy", "S&P 500 (SPY)"], ["qqq", "Nasdaq 100 (QQQ)"], ["gld", "Gold (GLD)"],
+  ["btc", "Bitcoin (BTC-USD)"], ["googl", "Google (GOOGL)"], ["nvda", "Nvidia (NVDA)"],
+  ["brkb", "Berkshire (BRK-B)"], ["mag7", "Magnificent 7"],
+  ["vti", "Vanguard Total US (VTI)"], ["vt", "Vanguard Total World (VT)"],
+];
+
+export async function getUniverse(universe) {
+  const q = universe ? `?universe=${encodeURIComponent(universe)}` : "";
+  const res = await fetch(`/api/universe${q}`);
+  const json = await res.json();
+  if (json.error) throw new Error(json.error);
+  return json.symbols;
+}
+
+export async function getReference(range, ref) {
+  const res = await fetch(`/api/reference?range=${encodeURIComponent(range)}&ref=${encodeURIComponent(ref)}`);
+  const json = await res.json();
+  if (json.error) throw new Error(json.error);
+  return json;   // {ref, label, range, t, rel}
+}
+
 export async function getStats(symbols) {
   const res = await fetch(`/api/stats?symbols=${encodeURIComponent(symbols.join(","))}`);
   const json = await res.json();
@@ -69,4 +92,24 @@ export async function deleteOpinion(symbol, id) {
   const json = await res.json();
   if (json.error) throw new Error(json.error);
   return json.deleted;
+}
+
+// ---- backtest ----
+export async function backtestSweep(symbol, range, maxPrice) {
+  let q = `symbol=${encodeURIComponent(symbol)}&range=${encodeURIComponent(range)}`;
+  if (maxPrice != null) q += `&max_price=${encodeURIComponent(maxPrice)}`;
+  const res = await fetch(`/api/backtest/sweep?${q}`);
+  const json = await res.json();
+  if (json.error) throw new Error(json.error);
+  return json;
+}
+
+export async function runBacktest(symbol, range, delta, hold, maxPrice) {
+  let q = `symbol=${encodeURIComponent(symbol)}&range=${encodeURIComponent(range)}` +
+    `&delta=${encodeURIComponent(delta)}&hold=${encodeURIComponent(hold)}`;
+  if (maxPrice != null) q += `&max_price=${encodeURIComponent(maxPrice)}`;
+  const res = await fetch(`/api/backtest?${q}`);
+  const json = await res.json();
+  if (json.error) throw new Error(json.error);
+  return json;
 }

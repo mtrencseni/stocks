@@ -4,10 +4,18 @@
 // hit-testing and an external highlight (for cross-panel linking). Kept
 // independent of uPlot: per-point bubble styling is far simpler on a raw canvas.
 
-const BG = "#22242a";
-const GRID = "#333640";
-const MUTED = "#8a8a8c";
-const TEXT = "#c6c7ca";
+// theme colors, refreshed from CSS variables on every draw (so the toggle works)
+let BG = "#22242a";
+let GRID = "#333640";
+let MUTED = "#8a8a8c";
+let TEXT = "#c6c7ca";
+function readTheme() {
+  const s = getComputedStyle(document.body);
+  BG = s.getPropertyValue("--panel").trim() || BG;
+  GRID = s.getPropertyValue("--border").trim() || GRID;
+  MUTED = s.getPropertyValue("--muted").trim() || MUTED;
+  TEXT = s.getPropertyValue("--text").trim() || TEXT;
+}
 
 const PAD = { top: 30, right: 14, bottom: 40, left: 56 };
 
@@ -156,6 +164,7 @@ export class ScatterChart {
 
   draw() {
     if (!this.wrap.clientWidth) return;
+    readTheme();
     this._layout();
     const ctx = this.ctx, pl = this.plot;
     const { xKey, yKey, title, xLabel, yLabel, colorOf, radiusOf } = this.opts;
