@@ -1,45 +1,33 @@
 "use strict";
 
-// Explore pane: a 2x2 of linked scatter panels driven by /api/screener.
-// Global encodings across all four panels: color = drift, size = volatility.
-// Hover cross-highlights the same stock everywhere; double-click opens its pane.
+// Config-driven screener pane: a 3x2 of linked scatter panels driven by
+// /api/screener. Two instances share one screener build/cache:
+//   - TRADE_CONFIG  ("Trade")  — swingy mean-reversion targets.
+//   - INVEST_CONFIG ("Invest") — WB/CM-style long-term quality compounders.
+// Each config supplies its panels, global color/size encoding, tooltip footer
+// and legend. Hover cross-highlights the same stock on every panel; the search
+// box and exchange/industry/profitable filters are shared machinery.
 
 import { ScatterChart } from "../scatter.js";
 
-// diverging drift color: red (downtrend) -> yellow (flat=good) -> green (uptrend)
+// diverging "goodness" color: red (bad) -> yellow -> green (good)
 const RED = [236, 138, 130], YEL = [230, 210, 120], GREEN = [137, 201, 150];
+const GREY = "rgba(154,160,166,0.7)";
 function mix(a, b, t) {
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 }
 function clamp01(t) { return t < 0 ? 0 : t > 1 ? 1 : t; }
+// map goodness g in [0,1] -> rgba string (0 = red, 0.5 = yellow, 1 = green)
+function rgbaFor(g) {
+  const c = g < 0.5 ? mix(RED, YEL, g * 2) : mix(YEL, GREEN, (g - 0.5) * 2);
+  return `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},0.85)`;
+}
 
 function pct(arr, q) {
   const a = arr.filter((x) => x != null).slice().sort((x, y) => x - y);
   if (!a.length) return 0;
   return a[Math.floor((a.length - 1) * q)];
 }
-
-const PANELS = [
-  { key: "tl", title: "[TL] Character", xKey: "up", yKey: "r2",
-    xLabel: "Confirmed upswings (≥40%)", yLabel: "R² of log-price (low = choppy = good)",
-    good: { x: [3, null], y: [null, 0.4] } },
-  { key: "tr", title: "[TR] Payoff", xKey: "bt_win", yKey: "bt_avg",
-    xLabel: "Backtest win rate", yLabel: "Avg return / trade (%)",
-    good: { x: [0.6, null], y: [10, null] } },
-  { key: "bl", title: "[BL] Value", xKey: "above_lo", yKey: "dd",
-    xLabel: "% above historic low (0 = at its low)", yLabel: "% below historic high (x+y = full range)",
-    good: { x: [null, 33], y: [30, null] } },
-  { key: "br", title: "[BR] Factor / 'off'", xKey: "idio_z", yKey: "off52",
-    xLabel: "Idiosyncratic z vs industry (left = off-to-downside)", yLabel: "% below 52-week high",
-    good: { x: [null, -1], y: [30, null] } },
-  { key: "growth", title: "[R3-L] Growth (YoY)", xKey: "rev_g", yKey: "earn_g",
-    xLabel: "Revenue growth YoY (%, clipped ±100)", yLabel: "Earnings growth YoY (%, clipped ±100)",
-    good: { x: [0, null], y: [0, null] },                   // top-right = both growing
-    clipX: [-100, 100], clipY: [-100, 100] },               // snap outliers to the rail
-  { key: "value", title: "[R3-R] Valuation (log-log)", xKey: "ps", yKey: "pe",
-    xLabel: "P/S (trailing, log)", yLabel: "P/E (trailing, log; profitable only)",
-    good: { x: [null, 5], y: [null, 20] }, logX: true, logY: true },                // bottom-left = cheap
-];
 
 const LOOKBACKS = ["1y", "3y", "5y"];
 
@@ -55,11 +43,156 @@ function indLabel(etf) {
   return IND_LABEL[etf] ? `${IND_LABEL[etf]} (${etf})` : etf;
 }
 
-export class ExplorePane {
+// ---------------------------------------------------------------------------
+// TRADE config — find swingy, mean-reverting speculation targets.
+// ---------------------------------------------------------------------------
+
+const PANELS_TRADE = [
+  { key: "tl", title: "[TL] Character", xKey: "up", yKey: "r2",
+    xLabel: "Confirmed upswings (≥40%)", yLabel: "R² of log-price (low = choppy = good)",
+    good: { x: [3, null], y: [null, 0.4] } },
+  { key: "tr", title: "[TR] Payoff", xKey: "bt_win", yKey: "bt_avg",
+    xLabel: "Backtest win rate", yLabel: "Avg return / trade (%)",
+    good: { x: [0.6, null], y: [10, null] } },
+  { key: "bl", title: "[BL] Value", xKey: "above_lo", yKey: "dd",
+    xLabel: "% above historic low (0 = at its low)", yLabel: "% below historic high (x+y = full range)",
+    good: { x: [null, 33], y: [30, null] } },
+  { key: "br", title: "[BR] Factor / 'off'", xKey: "idio_z", yKey: "off52",
+    xLabel: "Idiosyncratic z vs industry (left = off-to-downside)", yLabel: "% below 52-week high",
+    good: { x: [null, -1], y: [30, null] } },
+  { key: "growth", title: "[R3-L] Growth (YoY)", xKey: "rev_g", yKey: "earn_g",
+    xLabel: "Revenue growth YoY (%, clipped ±100)", yLabel: "Earnings growth YoY (%, clipped ±100)",
+    good: { x: [0, null], y: [0, null] }, clipX: [-100, 100], clipY: [-100, 100] },
+  { key: "value", title: "[R3-R] Valuation (log-log)", xKey: "ps", yKey: "pe",
+    xLabel: "P/S (trailing, log)", yLabel: "P/E (trailing, log; profitable only)",
+    good: { x: [null, 5], y: [null, 20] }, logX: true, logY: true },
+];
+
+function tradeEncode(stocks) {
+  // color = how IDEAL the drift is: green = flat (sweet spot), red = steep.
+  const dlo = Math.min(pct(stocks.map((s) => s.drift), 0.05), -0.1);
+  const dhi = Math.max(pct(stocks.map((s) => s.drift), 0.95), 0.1);
+  const dscale = Math.max(Math.abs(dlo), Math.abs(dhi), 0.1);
+  const vlo = pct(stocks.map((s) => s.vol), 0.05);
+  const vhi = pct(stocks.map((s) => s.vol), 0.95);
+  return {
+    colorOf: (p) => p.drift == null ? GREY : rgbaFor(clamp01(1 - Math.abs(p.drift) / dscale)),
+    radiusOf: (p) => {
+      const v = p.vol == null ? vlo : p.vol;
+      return 4 + 12 * clamp01(vhi > vlo ? (v - vlo) / (vhi - vlo) : 0.5);
+    },
+  };
+}
+
+const TRADE_LEGEND = [
+  ["Volatility", "dot size", "annualized stdev of daily returns: how big the swings are."],
+  ["Drift", "dot color", "trend fit: green = flat (ideal), red = steep (falling-knife or at-ATH)."],
+  ["Upswings", "TL&nbsp;x", "count of confirmed ≥40% low→high reversals: how often it round-trips."],
+  ["R²", "TL&nbsp;y", "line-fit of log-price: low = choppy (good to swing), high = clean trend."],
+  ["Win rate", "TR&nbsp;x", "fraction of backtested trades closing positive (+40% TP / −40% SL / 6mo)."],
+  ["Avg return", "TR&nbsp;y", "mean return per backtested trade under that rule."],
+  ["% below 52-week high", "BR&nbsp;y", "distance under the 1-year peak: the ripeness signal."],
+  ["% above historic low", "BL&nbsp;x", "distance above the multi-year low; with below-high it sums to the full range."],
+  ["% below historic high", "BL&nbsp;y", "drawdown from the multi-year peak."],
+  ["Idiosyncratic z", "BR&nbsp;x", "return minus its industry-ETF move, in σ: negative = fell on its own."],
+  ["Industry", "tooltip", "the sector ETF each stock is benchmarked against (e.g. SOXX, IGV)."],
+  ["Revenue growth", "R3-L&nbsp;x", "trailing YoY sales growth."],
+  ["Earnings growth", "R3-L&nbsp;y", "trailing YoY earnings growth (profitable names only)."],
+  ["P/S", "R3-R&nbsp;x", "price/sales; lower = cheaper (defined for all)."],
+  ["P/E", "R3-R&nbsp;y", "price/earnings; lower = cheaper (profitable only — negative dropped)."],
+];
+
+const TRADE_CONFIG = {
+  id: "explore", type: "explore", title: "Trade",
+  panels: PANELS_TRADE, encode: tradeEncode, legend: TRADE_LEGEND,
+  tooltipFoot: (p) => `vol ${fmt(p.vol)}% · drift ${fmt(p.drift)}%/yr`,
+};
+
+// ---------------------------------------------------------------------------
+// INVEST config — wonderful businesses (high returns on capital, durable
+// margins, fortress balance sheet, steady growth) at a fair price.
+// ---------------------------------------------------------------------------
+
+const PANELS_INVEST = [
+  { key: "moat", title: "[TL] Moat / returns on capital", xKey: "roe", yKey: "gross_m",
+    xLabel: "ROE (%)", yLabel: "Gross margin (%)",
+    good: { x: [15, null], y: [40, null] } },                       // top-right = moat
+  { key: "cash", title: "[TR] Profit → cash", xKey: "op_m", yKey: "fcf_m",
+    xLabel: "Operating margin (%)", yLabel: "FCF margin (%)",
+    good: { x: [15, null], y: [10, null] } },                       // top-right = real cash
+  { key: "balance", title: "[ML] Balance sheet", xKey: "nd_ebitda", yKey: "curr",
+    xLabel: "Net debt / EBITDA (×, lower = better)", yLabel: "Current ratio",
+    good: { x: [null, 2], y: [1.5, null] }, clipX: [-5, 8] },       // top-LEFT = fortress
+  { key: "growthq", title: "[MR] Durable growth", xKey: "rev_g", yKey: "earn_g",
+    xLabel: "Revenue growth YoY (%, clipped ±100)", yLabel: "Earnings growth YoY (%, clipped ±100)",
+    good: { x: [8, null], y: [8, null] }, clipX: [-100, 100], clipY: [-100, 100] },
+  { key: "owneryield", title: "[BL] Owner yield / value", xKey: "fcf_y", yKey: "earn_y",
+    xLabel: "FCF yield (%)", yLabel: "Earnings yield (%, = 1/PE)",
+    good: { x: [5, null], y: [5, null] } },                         // top-right = cheap cash
+  { key: "qualpx", title: "[BR] Quality vs price ★", xKey: "pe", yKey: "roe",
+    xLabel: "P/E (trailing, log)", yLabel: "ROE (%)",
+    good: { x: [null, 20], y: [20, null] }, logX: true },           // top-LEFT = great & cheap
+];
+
+function investEncode(stocks) {
+  // color = quality composite: blend of ROE, gross margin and low leverage.
+  const bounds = (key) => [pct(stocks.map((s) => s[key]), 0.1), pct(stocks.map((s) => s[key]), 0.9)];
+  const [roeLo, roeHi] = bounds("roe");
+  const [gmLo, gmHi] = bounds("gross_m");
+  const [ndLo, ndHi] = bounds("nd_ebitda");
+  const norm = (v, lo, hi) => (v == null || hi <= lo) ? null : clamp01((v - lo) / (hi - lo));
+  // size = market cap on a log scale
+  const caps = stocks.map((s) => s.mktcap).filter((x) => x > 0).map(Math.log);
+  const cLo = caps.length ? Math.min(...caps) : 0;
+  const cHi = caps.length ? Math.max(...caps) : 1;
+  return {
+    colorOf: (p) => {
+      const parts = [
+        norm(p.roe, roeLo, roeHi),
+        norm(p.gross_m, gmLo, gmHi),
+        p.nd_ebitda == null ? null : 1 - norm(p.nd_ebitda, ndLo, ndHi),  // less debt = better
+      ].filter((x) => x != null);
+      if (!parts.length) return GREY;
+      return rgbaFor(parts.reduce((a, b) => a + b, 0) / parts.length);
+    },
+    radiusOf: (p) =>
+      (!(p.mktcap > 0) || cHi <= cLo) ? 6 : 4 + 12 * clamp01((Math.log(p.mktcap) - cLo) / (cHi - cLo)),
+  };
+}
+
+const INVEST_LEGEND = [
+  ["Quality", "dot color", "blend of ROE, gross margin & low leverage — green = wonderful business."],
+  ["Market cap", "dot size", "company size (log scale)."],
+  ["ROE", "TL&nbsp;x · BR&nbsp;y", "return on equity — profit per $ of equity; the core moat signal."],
+  ["Gross margin", "TL&nbsp;y", "pricing power — revenue left after cost of goods."],
+  ["Operating margin", "TR&nbsp;x", "profit after operating costs."],
+  ["FCF margin", "TR&nbsp;y", "free cash flow as % of revenue — cash-conversion quality."],
+  ["Net debt / EBITDA", "ML&nbsp;x", "leverage — net borrowings vs cash earnings; lower = safer (left)."],
+  ["Current ratio", "ML&nbsp;y", "short-term liquidity — current assets / current liabilities."],
+  ["Revenue growth", "MR&nbsp;x", "trailing YoY sales growth."],
+  ["Earnings growth", "MR&nbsp;y", "trailing YoY earnings growth."],
+  ["FCF yield", "BL&nbsp;x", "free cash flow / market cap — the owner's cash return."],
+  ["Earnings yield", "BL&nbsp;y", "1 / P-E — the earnings return at today's price."],
+  ["P/E", "BR&nbsp;x", "price / earnings — cheaper to the left (profitable only)."],
+  ["Industry", "tooltip", "the sector ETF each stock is benchmarked against (e.g. SOXX, IGV)."],
+];
+
+const INVEST_CONFIG = {
+  id: "invest", type: "invest", title: "Invest",
+  panels: PANELS_INVEST, encode: investEncode, legend: INVEST_LEGEND,
+  tooltipFoot: (p) => `ROE ${fmt(p.roe)}% · ${fmtCap(p.mktcap)}`,
+};
+
+export const SCREENER_CONFIGS = { explore: TRADE_CONFIG, invest: INVEST_CONFIG };
+
+// ---------------------------------------------------------------------------
+
+export class ScreenerPane {
   constructor(opts = {}) {
-    this.id = "explore";
-    this.type = "explore";
-    this.title = "Explore";
+    this.config = opts.config || TRADE_CONFIG;
+    this.id = this.config.id;
+    this.type = this.config.type;
+    this.title = this.config.title;
     this.closable = false;
     this.onOpenStock = opts.onOpenStock || (() => {});
     this.viewState = { lookback: "3y" };   // in-memory, resets on reload
@@ -69,6 +202,7 @@ export class ExplorePane {
   }
 
   mount(container) {
+    const cfg = this.config;
     const root = document.createElement("div");
     root.className = "pane explore-pane";
     root.innerHTML = `
@@ -85,30 +219,12 @@ export class ExplorePane {
       </header>
       <div class="explore-filters"></div>
       <main class="explore-grid">
-        <div class="explore-cell" data-cell="tl"></div>
-        <div class="explore-cell" data-cell="tr"></div>
-        <div class="explore-cell" data-cell="bl"></div>
-        <div class="explore-cell" data-cell="br"></div>
-        <div class="explore-cell" data-cell="growth"></div>
-        <div class="explore-cell" data-cell="value"></div>
+        ${cfg.panels.map((p) => `<div class="explore-cell" data-cell="${p.key}"></div>`).join("")}
       </main>
       <footer class="explore-legend">
         <div class="legend-grid">
-          <p><b>Volatility</b> <i>(dot size)</i> — annualized stdev of daily returns: how big the swings are.</p>
-          <p><b>Drift</b> <i>(dot color)</i> — trend fit: green = flat (ideal), red = steep (falling-knife or at-ATH).</p>
-          <p><b>Upswings</b> <i>(TL&nbsp;x)</i> — count of confirmed ≥40% low→high reversals: how often it round-trips.</p>
-          <p><b>R²</b> <i>(TL&nbsp;y)</i> — line-fit of log-price: low = choppy (good to swing), high = clean trend.</p>
-          <p><b>Win rate</b> <i>(TR&nbsp;x)</i> — fraction of backtested trades closing positive (+40% TP / −40% SL / 6mo).</p>
-          <p><b>Avg return</b> <i>(TR&nbsp;y)</i> — mean return per backtested trade under that rule.</p>
-          <p><b>% below 52-week high</b> <i>(BR&nbsp;y)</i> — distance under the 1-year peak: the ripeness signal.</p>
-          <p><b>% above historic low</b> <i>(BL&nbsp;x)</i> — distance above the multi-year low; with below-high it sums to the full range.</p>
-          <p><b>% below historic high</b> <i>(BL&nbsp;y)</i> — drawdown from the multi-year peak; stands in for valuation until backfill.</p>
-          <p><b>Idiosyncratic z</b> <i>(BR&nbsp;x)</i> — return minus its industry-ETF move, in σ: negative = fell on its own.</p>
-          <p><b>Industry</b> <i>(tooltip)</i> — the sector ETF each stock is benchmarked against (e.g. SOXX, IGV).</p>
-          <p><b>Revenue growth</b> <i>(R3-L&nbsp;x)</i> — trailing YoY sales growth.</p>
-          <p><b>Earnings growth</b> <i>(R3-L&nbsp;y)</i> — trailing YoY earnings growth (profitable names only).</p>
-          <p><b>P/S</b> <i>(R3-R&nbsp;x)</i> — price/sales; lower = cheaper (defined for all).</p>
-          <p><b>P/E</b> <i>(R3-R&nbsp;y)</i> — price/earnings; lower = cheaper (profitable only — negative dropped).</p>
+          ${cfg.legend.map(([term, tag, desc]) =>
+            `<p><b>${term}</b> <i>(${tag})</i> — ${desc}</p>`).join("")}
         </div>
       </footer>
       <button class="legend-toggle" aria-label="What do these mean?">?</button>`;
@@ -120,7 +236,7 @@ export class ExplorePane {
     this.filtersEl = root.querySelector(".explore-filters");
     this.stocks = [];
     this.cells = {};
-    for (const p of PANELS) this.cells[p.key] = root.querySelector(`[data-cell="${p.key}"]`);
+    for (const p of cfg.panels) this.cells[p.key] = root.querySelector(`[data-cell="${p.key}"]`);
 
     this.searchInput.addEventListener("input", () => this._renderSearch());
     this.searchInput.addEventListener("focus", () => this._renderSearch());
@@ -131,11 +247,9 @@ export class ExplorePane {
       } else if (e.key === "ArrowUp") {
         if (open) { e.preventDefault(); this._setActive(this._activeIdx - 1); }
       } else if (e.key === " " || e.key === "Spacebar") {
-        // space = highlight the dots across all panels, then close
         const sym = this._activeSym();
         if (open && sym) { e.preventDefault(); this._pickSearch(sym); }
       } else if (e.key === "Enter") {
-        // enter = open the stock detail page
         const sym = this._activeSym();
         if (open && sym) { e.preventDefault(); this._openDetails(sym); }
       } else if (e.key === "Escape") {
@@ -153,7 +267,6 @@ export class ExplorePane {
       const item = e.target.closest("[data-sym]");
       if (item && this._hits) this._setActive(this._hits.indexOf(item.dataset.sym));
     });
-    // click outside the search box dismisses the dropdown
     this._onDocClick = (e) => {
       if (!root.querySelector(".explore-search").contains(e.target)) this._hideSearch();
     };
@@ -184,7 +297,6 @@ export class ExplorePane {
       this._syncToolbar();
       this.load();
     });
-    // mobile: the "?" toggles the legend as a bottom sheet; tapping it dismisses
     root.querySelector(".legend-toggle").addEventListener("click", () =>
       root.classList.toggle("legend-open"));
     root.querySelector(".explore-legend").addEventListener("click", () =>
@@ -230,7 +342,7 @@ export class ExplorePane {
         `<button class="esr-details" data-sym="${s.sym}">Details</button>` +
       `</div>`).join("");
     this.searchResults.hidden = false;
-    this._setActive(0);   // first result selected by default for keyboard nav
+    this._setActive(0);
   }
 
   _activeSym() {
@@ -240,7 +352,7 @@ export class ExplorePane {
   _setActive(idx) {
     const n = this._hits ? this._hits.length : 0;
     if (!n) { this._activeIdx = -1; return; }
-    this._activeIdx = ((idx % n) + n) % n;   // wrap around top/bottom
+    this._activeIdx = ((idx % n) + n) % n;
     const items = this.searchResults.querySelectorAll(".esr-item");
     items.forEach((el, i) => el.classList.toggle("active", i === this._activeIdx));
     const cur = items[this._activeIdx];
@@ -249,7 +361,6 @@ export class ExplorePane {
 
   _hideSearch() { this.searchResults.hidden = true; this._activeIdx = -1; }
 
-  // selecting a result highlights its dot across every panel (like a hover)
   _pickSearch(sym) {
     this.searchInput.value = sym;
     this._hideSearch();
@@ -272,43 +383,25 @@ export class ExplorePane {
       this._baseStatus =
         `${json.stocks.length} stocks · ${json.lookback} · as of ${(json.asof || "").slice(0, 16).replace("T", " ")}`;
       this.statusEl.textContent = this._baseStatus;
-      this._build(json.stocks);   // builds charts, chips, and applies current filters
+      this._build(json.stocks);
     } catch (e) {
       this.statusEl.textContent = "Error: " + e.message;
     }
   }
 
   _build(stocks) {
-    this.stocks = stocks;   // keep for the search box
-    // global encodings: drift color + volatility size, shared across all panels.
-    // color = how IDEAL the drift is: green = flat (sweet spot), red = steep
-    // (falling-knife OR at-ATH). So green = good everywhere.
-    const dlo = Math.min(pct(stocks.map((s) => s.drift), 0.05), -0.1);
-    const dhi = Math.max(pct(stocks.map((s) => s.drift), 0.95), 0.1);
-    const dscale = Math.max(Math.abs(dlo), Math.abs(dhi), 0.1);
-    const vlo = pct(stocks.map((s) => s.vol), 0.05);
-    const vhi = pct(stocks.map((s) => s.vol), 0.95);
-
-    const colorOf = (p) => {
-      if (p.drift == null) return "rgba(154,160,166,0.7)";
-      const g = clamp01(1 - Math.abs(p.drift) / dscale);   // 1 = flat = green, 0 = steep = red
-      const c = g < 0.5 ? mix(RED, YEL, g * 2) : mix(YEL, GREEN, (g - 0.5) * 2);
-      return `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},0.85)`;
-    };
-    const radiusOf = (p) => {
-      const v = p.vol == null ? vlo : p.vol;
-      return 4 + 12 * clamp01(vhi > vlo ? (v - vlo) / (vhi - vlo) : 0.5);
-    };
-
+    this.stocks = stocks;
+    const { colorOf, radiusOf } = this.config.encode(stocks);
     const onHover = (sym) => { for (const c of this.charts) c.setHighlight(sym); };
     const onPick = (sym) => this.onOpenStock(sym);
+    const foot = this.config.tooltipFoot;
 
-    for (const panel of PANELS) {
+    for (const panel of this.config.panels) {
       const tooltipHTML = (p) =>
         `<b>${p.sym}</b> <span class="muted">${indLabel(p.ind)}</span><br>` +
         `${panel.xLabel.split(" (")[0]}: ${fmt(p[panel.xKey])}<br>` +
         `${panel.yLabel.split(" —")[0].split(" (")[0]}: ${fmt(p[panel.yKey])}<br>` +
-        `vol ${fmt(p.vol)}% · drift ${fmt(p.drift)}%/yr`;
+        foot(p);
       const chart = new ScatterChart(this.cells[panel.key], {
         title: panel.title, xLabel: panel.xLabel, yLabel: panel.yLabel,
         xKey: panel.xKey, yKey: panel.yKey, goodZone: panel.good,
@@ -371,7 +464,18 @@ export class ExplorePane {
   resizeAll() { for (const c of this.charts) c.resize(); }
 }
 
+// back-compat alias (main.js used to import ExplorePane)
+export const ExplorePane = ScreenerPane;
+
 function fmt(v) { return v == null ? "—" : (Math.round(v * 100) / 100).toString(); }
+
+function fmtCap(v) {
+  if (v == null || !(v > 0)) return "—";
+  if (v >= 1e12) return `$${(v / 1e12).toFixed(2)}T`;
+  if (v >= 1e9) return `$${(v / 1e9).toFixed(1)}B`;
+  if (v >= 1e6) return `$${(v / 1e6).toFixed(0)}M`;
+  return `$${v}`;
+}
 
 function escapeHTML(s) {
   return (s || "").replace(/[&<>"']/g, (c) =>

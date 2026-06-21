@@ -290,3 +290,24 @@ def _attach_fundamentals(rows):
         r["ps"]     = ps if (ps is not None and ps > 0) else None
         r["rev_g"]  = rg * 100 if rg is not None else None
         r["earn_g"] = eg * 100 if eg is not None else None
+
+        # --- Invest-tab quality/value metrics (same .info, no extra requests) ---
+        roe = _f(info.get("returnOnEquity"))
+        gm  = _f(info.get("grossMargins"))
+        om  = _f(info.get("operatingMargins"))
+        fcf = _f(info.get("freeCashflow"))
+        rev = _f(info.get("totalRevenue"))
+        mcap = _f(info.get("marketCap"))
+        debt = _f(info.get("totalDebt"))
+        cash = _f(info.get("totalCash"))
+        ebitda = _f(info.get("ebitda"))
+        r["roe"]       = roe * 100 if roe is not None else None     # %
+        r["gross_m"]   = gm * 100 if gm is not None else None       # %
+        r["op_m"]      = om * 100 if om is not None else None       # %
+        r["fcf_m"]     = (fcf / rev * 100) if (fcf is not None and rev) else None
+        r["fcf_y"]     = (fcf / mcap * 100) if (fcf is not None and mcap) else None
+        r["nd_ebitda"] = ((debt - cash) / ebitda) if (
+            debt is not None and cash is not None and ebitda) else None
+        r["curr"]      = _f(info.get("currentRatio"))
+        r["mktcap"]    = mcap
+        r["earn_y"]    = (100.0 / pe) if (pe is not None and pe > 0) else None  # 1/PE, %
