@@ -56,7 +56,6 @@ function extLinksHTML(sym, exchange) {
     ["Google Finance", gx ? `https://www.google.com/finance/quote/${s}:${gx}`
                           : `https://www.google.com/finance/quote/${s}`],
     ["Yahoo Finance", `https://finance.yahoo.com/quote/${s}`],
-    ["Macrotrends", `https://www.macrotrends.net/stocks/charts/${s}/x/`],
     ["Seeking Alpha", `https://seekingalpha.com/symbol/${s}`],
   ];
   return `<div class="si-links">` +

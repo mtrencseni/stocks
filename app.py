@@ -68,6 +68,7 @@ _cache = {}        # (range, (sym, ...), metric) -> (fetched_at, payload)
 _stats_cache = {}  # (sym, ...) -> (fetched_at, payload)
 _info_cache = {}   # sym -> (fetched_at, info dict)
 INFO_TTL = 1800
+INFO_EMPTY_TTL = 60   # a bad/empty .info is cached only briefly, so reloads retry
 
 _screener_cache = {}   # (universe, lookback) -> (fetched_at, payload)
 SCREENER_TTL = 6 * 3600   # daily data; recompute at most every 6h
@@ -87,8 +88,12 @@ def get_info(sym):
     """Cached yfinance .info (shared by stats + the ratio anchor)."""
     now = time.time()
     hit = _info_cache.get(sym)
-    if hit and now - hit[0] < INFO_TTL:
-        return hit[1]
+    if hit:
+        # a previously-cached empty/partial .info expires fast so reloads retry;
+        # a good one rides the full TTL
+        ttl = INFO_TTL if hit[1].get("longName") else INFO_EMPTY_TTL
+        if now - hit[0] < ttl:
+            return hit[1]
     try:
         info = yf.Ticker(sym).info
     except Exception:
@@ -921,6 +926,50 @@ def api_earnings_detail():
 def api_universe():
     u = request.args.get("universe", "ndx100")
     return jsonify(symbols=UNIVERSES.get(u, UNIVERSES["ndx100"]))
+
+
+# Market open/closed from Yahoo (authoritative: handles holidays + half-days).
+# NYSE and NASDAQ share the same US session, so one status covers both.
+_market_cache = {}      # "us" -> (fetched_at, payload)
+MARKET_TTL = 60
+
+
+def _market_status():
+    """{open, status, message} from yfinance's Market; cached 60s.
+    Falls back to a weekday/time estimate only if the live fetch fails."""
+    now = time.time()
+    hit = _market_cache.get("us")
+    if hit and now - hit[0] < MARKET_TTL:
+        return hit[1]
+    payload = None
+    try:
+        s = yf.Market("US").status
+        status = str(s.get("status", "")).lower()
+        payload = {
+            "open": status == "open",
+            "status": status,
+            "message": s.get("message"),
+            "source": "yahoo",
+        }
+    except Exception as exc:
+        # degrade gracefully: estimate from ET wall-clock (no holiday awareness)
+        nowny = datetime.now(NY)
+        mins = nowny.hour * 60 + nowny.minute
+        est_open = nowny.weekday() < 5 and 9 * 60 + 30 <= mins < 16 * 60
+        payload = {
+            "open": est_open,
+            "status": "open" if est_open else "closed",
+            "message": None,
+            "source": "estimate",
+            "error": str(exc),
+        }
+    _market_cache["us"] = (now, payload)
+    return payload
+
+
+@app.route("/api/market")
+def api_market():
+    return jsonify(_market_status())
 
 
 @app.route("/api/reference")

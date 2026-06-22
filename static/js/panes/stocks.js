@@ -20,6 +20,16 @@ function loadSymbols() {
 }
 function saveSymbols(list) { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); }
 
+// Default stats density by platform (browser UA): mobile -> Hide, Mac -> Min,
+// Windows -> Full. Falls back to Full for anything else.
+function defaultStatsMode() {
+  const ua = navigator.userAgent || "";
+  if (/Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(ua)) return "hide";
+  if (/Macintosh|Mac OS X/i.test(ua)) return "min";
+  if (/Windows/i.test(ua)) return "full";
+  return "full";
+}
+
 export class StocksPane {
   constructor(opts = {}) {
     this.id = "stocks";
@@ -28,7 +38,7 @@ export class StocksPane {
     this.closable = false;
     this.onOpenStock = opts.onOpenStock || (() => {});
     this.symbols = loadSymbols();
-    this.viewState = { range: "1d", metric: "price", yaxis: "per", compare: "", stats: "full" };  // in-memory
+    this.viewState = { range: "1d", metric: "price", yaxis: "per", compare: "", stats: defaultStatsMode() };  // in-memory
     this.cards = {};
     this.cross = new CrosshairGroup();
     this.lastSeries = null;
@@ -66,6 +76,7 @@ export class StocksPane {
         <div class="ranges" data-group="stats">
           <button data-stats="full">Full</button>
           <button data-stats="min">Min</button>
+          <button data-stats="hide">Hide</button>
         </div>
         <div class="ranges" data-group="compare">
           <select class="compare-select" title="Overlay: same $ invested in a reference">
@@ -146,7 +157,10 @@ export class StocksPane {
       b.classList.toggle("active", b.dataset.yaxis === v.yaxis));
     this.root.querySelectorAll('[data-group="stats"] button').forEach((b) =>
       b.classList.toggle("active", b.dataset.stats === v.stats));
-    if (this.grid) this.grid.classList.toggle("stats-min", v.stats === "min");
+    if (this.grid) {
+      this.grid.classList.toggle("stats-min", v.stats === "min");
+      this.grid.classList.toggle("stats-hide", v.stats === "hide");
+    }
   }
 
   onActivate() {

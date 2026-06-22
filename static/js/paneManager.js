@@ -8,7 +8,7 @@
 //     survives pane switches but resets to defaults on reload.
 
 import { makeThemeToggle } from "./theme.js";
-import { getUniverse } from "./api.js";
+import { getUniverse, getMarketStatus } from "./api.js";
 
 const SESSION_KEY = "session.v1";
 
@@ -143,11 +143,67 @@ export class PaneManager {
     const spacer = document.createElement("div");
     spacer.className = "side-spacer";
     this.sidebar.appendChild(spacer);
+    this.sidebar.appendChild(this._clockEl());   // ET clock + market status
     const footer = document.createElement("div");   // shamrock (left) + theme toggle (right)
     footer.className = "side-footer";
     footer.appendChild(this._makeLucky());
     footer.appendChild(makeThemeToggle());
     this.sidebar.appendChild(footer);
+  }
+
+  // ET clock + NYSE/NASDAQ open status. Created once; tickers keep the stored
+  // element live so re-appending it on each renderSidebar() is cheap.
+  // The time is rendered client-side every second; the open/closed status is
+  // authoritative from /api/market (Yahoo: holiday- and half-day-aware),
+  // polled every 60s. NYSE and NASDAQ share the US session, so one status
+  // drives both pills.
+  _clockEl() {
+    if (this._clock) return this._clock;
+    const box = document.createElement("div");
+    box.className = "side-clock";
+    const time = document.createElement("div");
+    time.className = "sc-time";
+    const pills = document.createElement("div");
+    pills.className = "sc-pills";
+    const nyse = document.createElement("span");
+    nyse.className = "sc-pill";
+    const ndaq = document.createElement("span");
+    ndaq.className = "sc-pill";
+    pills.append(nyse, ndaq);
+    box.append(time, pills);
+
+    const fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York", hour12: false,
+      hour: "2-digit", minute: "2-digit",
+    });
+    const tick = () => {
+      const parts = {};
+      for (const p of fmt.formatToParts(new Date())) parts[p.type] = p.value;
+      const hh = parts.hour === "24" ? "00" : parts.hour;   // midnight quirk
+      time.textContent = `${hh}:${parts.minute} ET`;
+    };
+    tick();
+    setInterval(tick, 1000);
+
+    const applyStatus = (open) => {
+      for (const [el, name] of [[nyse, "NYSE"], [ndaq, "NASDAQ"]]) {
+        el.textContent = `${name} ${open ? "OPEN" : "CLOSED"}`;
+        el.classList.toggle("open", open);
+      }
+    };
+    applyStatus(false);   // placeholder until the first fetch resolves
+    const refresh = async () => {
+      try {
+        const s = await getMarketStatus();
+        applyStatus(!!s.open);
+        if (s.message) box.title = s.message;
+      } catch (e) { /* keep last-known pills on a transient failure */ }
+    };
+    refresh();
+    setInterval(refresh, 60000);
+
+    this._clock = box;
+    return box;
   }
 
   _makeLucky() {

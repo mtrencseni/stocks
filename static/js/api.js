@@ -42,6 +42,11 @@ export async function getUniverse(universe) {
   return json.symbols;
 }
 
+export async function getMarketStatus() {
+  const res = await fetch("/api/market");
+  return res.json();   // { open, status, message, source }
+}
+
 export async function getReference(range, ref) {
   const res = await fetch(`/api/reference?range=${encodeURIComponent(range)}&ref=${encodeURIComponent(ref)}`);
   const json = await res.json();

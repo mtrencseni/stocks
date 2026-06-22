@@ -101,6 +101,36 @@ body:not(.light) .tt-moon { color: var(--accent-fg); }
 /* light: knob left, over the sun */
 body.light .tt-knob { transform: translateX(0); }
 body.light .tt-sun { color: var(--accent-fg); }
+.side-clock {
+  padding: 2px 8px 4px;   /* left 8px aligns with the footer / Lucky icon */
+}
+.sc-time {
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .5px;
+}
+.sc-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+.sc-pill {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: .4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+.sc-pill.open {
+  color: var(--up);
+  border-color: var(--up);
+}
 .side-title {
   color: var(--muted);
   font-size: 10px;
@@ -842,6 +872,8 @@ body.sidebar-collapsed .stock-info { padding-left: 50px; }
 }
 /* Min stats: drop the reserved 3-row height so the chart grows taller */
 .grid.stats-min .stats { min-height: 0; margin-top: 4px; }
+/* Hide stats: remove the text entirely, chart fills the whole card */
+.grid.stats-hide .stats { display: none; }
 .stats .row { display: flex; justify-content: space-between; gap: 8px; }
 .stats .k { color: var(--muted); }
 .stats .v { color: var(--text); }
