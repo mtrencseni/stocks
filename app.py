@@ -70,7 +70,6 @@ _info_cache = {}   # sym -> (fetched_at, info dict)
 INFO_TTL = 1800
 INFO_EMPTY_TTL = 60   # a bad/empty .info is cached only briefly, so reloads retry
 
-_screener_cache = {}   # (universe, lookback) -> (fetched_at, payload)
 SCREENER_TTL = 6 * 3600   # daily data; recompute at most every 6h
 EARN_TTL = 12 * 3600      # earnings are quarterly-stable; refresh at most every 12h
 
@@ -84,25 +83,40 @@ def _f(x):
         return None
 
 
+def _info_complete(info):
+    # yfinance often returns the name/quote fields but not the assetProfile
+    # (longBusinessSummary). Treat "named but no description" as incomplete so
+    # we keep retrying to fill it in rather than pinning a 30-min partial cache.
+    return bool(info.get("longName") and info.get("longBusinessSummary"))
+
+
 def get_info(sym):
-    """Cached yfinance .info (shared by stats + the ratio anchor)."""
+    """Cached yfinance .info (shared by stats + the ratio anchor).
+    yfinance hands back partial dicts; we merge so a field we've already seen
+    (e.g. the description) is never lost, and a still-incomplete cache expires
+    fast so the next request retries to complete it."""
     now = time.time()
     hit = _info_cache.get(sym)
     if hit:
-        # a previously-cached empty/partial .info expires fast so reloads retry;
-        # a good one rides the full TTL
-        ttl = INFO_TTL if hit[1].get("longName") else INFO_EMPTY_TTL
+        ttl = INFO_TTL if _info_complete(hit[1]) else INFO_EMPTY_TTL
         if now - hit[0] < ttl:
             return hit[1]
     try:
         info = yf.Ticker(sym).info
     except Exception:
         info = {}
-    # keep-last-good: a transient empty/partial .info must not wipe a good cache
-    # (this is what made descriptions vanish when the 30-min cache refreshed)
-    if (not info or not info.get("longName")) and hit:
-        _info_cache[sym] = (now, hit[1])
-        return hit[1]
+    # merge new non-empty fields over the last-good cache (don't lose a summary
+    # to a later partial fetch); a wholly empty/unnamed fetch keeps the old one.
+    if hit and hit[1]:
+        merged = dict(hit[1])
+        for k, v in (info or {}).items():
+            if v not in (None, ""):
+                merged[k] = v
+        info = merged
+    if not info or not info.get("longName"):
+        if hit:
+            _info_cache[sym] = (now, hit[1])
+            return hit[1]
     _info_cache[sym] = (now, info)
     return info
 
@@ -208,8 +222,11 @@ MT_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
 MT_RATIOS = {"pe": "pe-ratio", "ps": "price-sales"}
 MT_FINANCIALS = {"revenue": "revenue", "netIncome": "net-income"}
 MT_PATH = {**MT_RATIOS, **MT_FINANCIALS}
-MT_INTERVAL = 5       # seconds between scrape requests
-MT_COOLDOWN = 900     # don't retry a failed (sym,metric) for 15 min
+MT_INTERVAL = 20      # gentle background cadence — leave macrotrends headroom for
+                      #   the synchronous on-demand fetches that serve open pages
+MT_BG_QUIET = 15      # pause the background sweep this long after an on-demand scrape
+MT_COOLDOWN = 900     # don't retry a failed (sym,metric) for 15 min (background)
+MT_PRIORITY_COOLDOWN = 25  # but retry a viewed symbol's failures quickly
 # which yfinance .info field is the *current* trailing per-share denominator
 ANCHOR_FIELD = {"pe": "trailingEps", "ps": "revenuePerShare"}
 
@@ -239,14 +256,14 @@ def _save_metric(sym, metric, rows):
     os.replace(tmp, _data_path(sym))   # atomic
 
 
-def _mt_fetch(url, tries=3):
+def _mt_fetch(url, tries=3, backoff=5):
     for i in range(tries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": MT_UA})
             return urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
             if e.code == 429 and i < tries - 1:
-                time.sleep(5 * (i + 1))
+                time.sleep(backoff * (i + 1))
                 continue
             raise
 
@@ -277,14 +294,58 @@ def _mt_parse_series(html):
     return sorted(([d, v] for d, v in seen.items()), key=lambda r: r[0])
 
 
-def scrape_one(sym, metric):
-    """Scrape a single (sym, metric) page and persist it. Raises on failure."""
+def scrape_one(sym, metric, quick=False):
+    """Scrape a single (sym, metric) page and persist it. Raises on failure.
+    `quick` (on-demand path) fails fast instead of long 429 backoffs."""
     url = f"https://www.macrotrends.net/stocks/charts/{sym}/x/{MT_PATH[metric]}"
-    html = _mt_fetch(url)
+    html = _mt_fetch(url, tries=2, backoff=2) if quick else _mt_fetch(url)
     rows = _mt_parse(html) if metric in MT_RATIOS else _mt_parse_series(html)
     if not rows:
         raise RuntimeError("parsed 0 rows")
     _save_metric(sym, metric, rows)
+
+
+# --- on-demand scraping: do it now, on the request thread ---------------------
+# Opening a stock detail page is rare and user-initiated, so we'd rather scrape
+# any missing metric synchronously (a second or two) and return complete data
+# than queue it for the background sweep and make the page wait/poll. Only
+# metrics with NO data yet are fetched here; present-but-stale data is served
+# immediately and refreshed by the background scheduler.
+_scrape_locks = {}
+_scrape_locks_guard = threading.Lock()
+_last_ondemand = 0.0           # epoch of the last on-demand scrape (background yields to it)
+
+
+def _unit_lock(key):
+    with _scrape_locks_guard:
+        lk = _scrape_locks.get(key)
+        if lk is None:
+            lk = _scrape_locks[key] = threading.Lock()
+        return lk
+
+
+def _has_rows(sym, metric):
+    return bool((load_fundamentals(sym).get(metric) or {}).get("rows"))
+
+
+def ensure_scraped(sym, metrics):
+    """Synchronously scrape any of `metrics` that have no data yet. Best-effort:
+    a failure just leaves that metric empty (the page renders the rest)."""
+    global _last_ondemand
+    for metric in metrics:
+        if _has_rows(sym, metric):
+            continue
+        _last_ondemand = time.time()     # tell the background sweep to back off
+        with _unit_lock((sym, metric)):
+            if _has_rows(sym, metric):   # another request just filled it
+                continue
+            try:
+                scrape_one(sym, metric, quick=True)
+            except Exception as exc:
+                print(f"[macrotrends] on-demand {sym}/{metric} failed: {exc}", flush=True)
+            finally:
+                _last_attempt[(sym, metric)] = time.time()
+                _last_ondemand = time.time()
 
 
 # --- background scheduler: refresh stale (sym, metric) units, <=1 req/min -----
@@ -310,26 +371,63 @@ def remember_symbols(symbols):
             json.dump(sorted(current | set(symbols)), fh)
 
 
+# When the UI opens a stock, push it to the front of the scrape queue so the
+# symbol you're looking at fills in within seconds instead of waiting behind the
+# whole alphabetical background sweep.
+_priority = []                       # symbols to scrape ASAP, most-recent first
+_priority_lock = threading.Lock()
+
+
+def prioritize(sym):
+    with _priority_lock:
+        if sym in _priority:
+            _priority.remove(sym)
+        _priority.insert(0, sym)
+        del _priority[8:]            # cap the bump list
+
+
+def _unit_stale(sym, data, now, today, cooldown):
+    """First stale (sym, metric) for one symbol's loaded data, or None.
+    `cooldown` is how long to wait before retrying a failed unit."""
+    for metric in MT_PATH:
+        m = data.get(metric)
+        fresh = m and m.get("rows") and m.get("scraped_at", "")[:10] == today
+        if fresh:
+            continue
+        if now - _last_attempt.get((sym, metric), 0) < cooldown:
+            continue
+        return sym, metric
+    return None
+
+
 def _next_unit():
-    """The next stale (sym, metric) to scrape, respecting per-unit cooldown."""
+    """The next stale (sym, metric) to scrape. Prioritized (recently-viewed)
+    symbols come before the background sweep AND retry on a short cooldown, so
+    a transient macrotrends failure on the page you're looking at doesn't park
+    it for the full 15-minute background cooldown."""
     today = datetime.now(NY).date().isoformat()
     now = time.time()
-    for sym in known_symbols():
-        data = load_fundamentals(sym)
-        for metric in MT_PATH:
-            m = data.get(metric)
-            fresh = m and m.get("rows") and m.get("scraped_at", "")[:10] == today
-            if fresh:
-                continue
-            if now - _last_attempt.get((sym, metric), 0) < MT_COOLDOWN:
-                continue
-            return sym, metric
+    with _priority_lock:
+        pri = list(_priority)
+    for sym in pri:                     # actively-viewed: jump queue, retry fast
+        unit = _unit_stale(sym, load_fundamentals(sym), now, today, MT_PRIORITY_COOLDOWN)
+        if unit:
+            return unit
+    for sym in known_symbols():         # background sweep: gentle retry cadence
+        unit = _unit_stale(sym, load_fundamentals(sym), now, today, MT_COOLDOWN)
+        if unit:
+            return unit
     return None
 
 
 def _scheduler_loop():
     while True:
         try:
+            # yield to user-triggered on-demand fetches so we don't compete for
+            # macrotrends' rate budget and trigger 429s on the page being viewed
+            if time.time() - _last_ondemand < MT_BG_QUIET:
+                time.sleep(MT_BG_QUIET)
+                continue
             unit = _next_unit()
             if unit:
                 sym, metric = unit
@@ -399,6 +497,9 @@ def history():
         return jsonify(error="bad request: need valid range, symbols, metric"), 400
 
     remember_symbols(symbols)
+    if metric in ("pe", "ps") and len(symbols) == 1:
+        prioritize(symbols[0])                    # bump in the background queue too
+        ensure_scraped(symbols[0], [metric])      # fetch now if missing; no waiting
     key = (rng, tuple(symbols), metric)
     now = time.time()
     hit = _cache.get(key)
@@ -410,6 +511,13 @@ def history():
         if metric in ("pe", "ps"):
             payload = apply_metric(payload, metric, symbols)
             payload["metric"] = metric
+            # a ratio computed before the macrotrends scrape is anchor-only
+            # (flat denominator); don't pin that in the 1h cache — recompute on
+            # the next request so it self-heals once the scraper fills it in.
+            incomplete = any(not (load_fundamentals(s).get(metric, {}).get("rows"))
+                             for s in symbols)
+            if incomplete:
+                return jsonify(payload)
     except Exception as exc:
         return jsonify(error=f"fetch failed: {exc}"), 502
 
@@ -558,6 +666,7 @@ def profile():
     if not sym:
         return jsonify(error="bad request: need symbol"), 400
     remember_symbols([sym])
+    prioritize(sym)
     try:
         payload = {"symbol": sym, "profile": build_profile(sym), "earnings": get_earnings(sym)}
     except Exception as exc:
@@ -605,6 +714,8 @@ def financials():
     if not sym:
         return jsonify(error="bad request: need symbol"), 400
     remember_symbols([sym])
+    prioritize(sym)
+    ensure_scraped(sym, MT_FINANCIALS)   # fetch now if missing; don't make the page wait on the queue
     try:
         payload = build_financials(sym)
     except Exception as exc:
@@ -612,16 +723,95 @@ def financials():
     return jsonify(payload)
 
 
-def cached_screener(universe="ndx100", lookback="3y"):
-    """Screener payload, served from the shared cache (build on miss)."""
-    key = (universe, lookback)
+# ----------------------------------------------------------------------------
+# Disk-backed, single-flight, stale-while-revalidate cache for the expensive
+# whole-universe builds (screener, calendar). Two problems it solves:
+#   * a restart/deploy wipes the in-memory cache, forcing a ~38s cold rebuild
+#     of the ~354-ticker yfinance download — now we warm from disk instead;
+#   * a warm-but-stale entry (past TTL) used to block one request on the full
+#     rebuild — now the stale value is served instantly and refreshed in the
+#     background. Only the very first build ever (no memory, no disk) blocks.
+# ----------------------------------------------------------------------------
+_swr_mem = {}            # name -> (built_at, payload)
+_swr_locks = {}          # name -> Lock (single-flight per name)
+_swr_guard = threading.Lock()
+
+
+def _swr_lock(name):
+    with _swr_guard:
+        lk = _swr_locks.get(name)
+        if lk is None:
+            lk = _swr_locks[name] = threading.Lock()
+        return lk
+
+
+def _swr_path(name):
+    return os.path.join(DATA_DIR, f"_cache_{name}.json")
+
+
+def _swr_load_disk(name):
+    try:
+        with open(_swr_path(name)) as fh:
+            d = json.load(fh)
+        return d["built_at"], d["payload"]
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        return None
+
+
+def _swr_save_disk(name, built_at, payload):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = _swr_path(name) + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump({"built_at": built_at, "payload": payload}, fh)
+    os.replace(tmp, _swr_path(name))           # atomic
+
+
+def _swr_build(name, builder, ttl):
+    """Run builder() under the single-flight lock; cache + persist the result.
+    Re-checks freshness after acquiring so we don't rebuild what another thread
+    just built while we waited for the lock."""
+    with _swr_lock(name):
+        hit = _swr_mem.get(name)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        payload = builder()
+        built = time.time()
+        _swr_mem[name] = (built, payload)
+        _swr_save_disk(name, built, payload)
+        return payload
+
+
+def _swr_refresh_async(name, builder, ttl):
+    if _swr_lock(name).locked():
+        return                                  # a build is already in flight
+    def work():
+        try:
+            _swr_build(name, builder, ttl)
+        except Exception as exc:
+            print(f"[swr] background refresh {name} failed: {exc}", flush=True)
+    threading.Thread(target=work, daemon=True).start()
+
+
+def swr_cached(name, builder, ttl):
+    """Fresh -> return it. Stale -> return stale now, refresh in background.
+    Cold process -> warm from disk first. Nothing anywhere -> build (blocks)."""
     now = time.time()
-    hit = _screener_cache.get(key)
-    if hit and now - hit[0] < SCREENER_TTL:
+    hit = _swr_mem.get(name)
+    if hit is None:
+        disk = _swr_load_disk(name)
+        if disk:
+            _swr_mem[name] = hit = disk
+    if hit:
+        if now - hit[0] >= ttl:
+            _swr_refresh_async(name, builder, ttl)
         return hit[1]
-    payload = build_screener(lookback, universe)
-    _screener_cache[key] = (now, payload)
-    return payload
+    return _swr_build(name, builder, ttl)
+
+
+def cached_screener(universe="ndx100", lookback="3y"):
+    """Screener payload — disk-backed, single-flight, stale-while-revalidate."""
+    return swr_cached(f"screener_{universe}_{lookback}",
+                      lambda: build_screener(lookback, universe), SCREENER_TTL)
 
 
 @app.route("/api/screener")
@@ -636,7 +826,6 @@ def screener():
         return jsonify(error=f"screener failed: {exc}"), 502
 
 
-_calendar_cache = {}   # "calendar" -> (fetched_at, payload)
 CALENDAR_TTL = 1800
 
 
@@ -663,20 +852,12 @@ def _reaction(ser, rd):
             "now": now, "nowPct": ((now / pre - 1) * 100) if pre else None}
 
 
-@app.route("/api/calendar")
-def api_calendar():
+def _build_calendar():
     """Recent + upcoming earnings across the universe, each joined with its
     screener filter attributes (so the page reuses the same group filters +
     search) and its last-report price reaction. Window of +/-3M (the widest UI
-    option); the frontend narrows by window/mode. Cached (batched price fetch)."""
-    now_t = time.time()
-    hit = _calendar_cache.get("calendar")
-    if hit and now_t - hit[0] < CALENDAR_TTL:
-        return jsonify(hit[1])
-    try:
-        rows = {r["sym"]: r for r in cached_screener()["stocks"]}
-    except Exception as exc:
-        return jsonify(error=f"calendar failed: {exc}"), 502
+    option); the frontend narrows by window/mode."""
+    rows = {r["sym"]: r for r in cached_screener()["stocks"]}
     syms = list(rows.keys())
     today = datetime.now(NY).date()
     horizon = 95
@@ -720,9 +901,17 @@ def api_calendar():
                 out.append({**attrs, "date": nx["date"], "days": d, "past": False,
                             "estimated": bool(nx.get("estimated")), "epsEst": nx.get("epsEst")})
     out.sort(key=lambda x: (x["date"], x["sym"]))
-    payload = {"asof": today.isoformat(), "entries": out}
-    _calendar_cache["calendar"] = (now_t, payload)
-    return jsonify(payload)
+    return {"asof": today.isoformat(), "entries": out}
+
+
+@app.route("/api/calendar")
+def api_calendar():
+    """Earnings calendar — disk-backed, single-flight, stale-while-revalidate
+    (so a restart or TTL expiry never blocks on the whole-universe rebuild)."""
+    try:
+        return jsonify(swr_cached("calendar", _build_calendar, CALENDAR_TTL))
+    except Exception as exc:
+        return jsonify(error=f"calendar failed: {exc}"), 502
 
 
 # ----------------------------------------------------------------------------

@@ -247,6 +247,8 @@ export class StockPane {
     if (this.zzChart) this.zzChart.destroy();
     if (this._btRO) this._btRO.disconnect();
     clearTimeout(this._finTimer);
+    clearTimeout(this._profTimer);
+    clearTimeout(this._metTimer);
     cancelAnimationFrame(this._btRAF);
     for (const id in this.pollTimers) clearInterval(this.pollTimers[id]);
     if (this.root) this.root.remove();
@@ -718,6 +720,8 @@ export class StockPane {
     this._syncToolbar();
     this.statusEl.textContent = "Loading…";
     this.cross.reset();
+    this._metTries = 0;               // restart ratio self-heal for the new range
+    clearTimeout(this._metTimer);
     try {
       // one history call per metric (the endpoint takes a single metric)
       const results = await Promise.all(METRICS.map((m) =>
@@ -734,9 +738,40 @@ export class StockPane {
         this.renderInfo();
       }
       this.statusEl.textContent = "";
+      this._maybePollMetrics();       // P/E·P/S depend on the background scrape
     } catch (e) {
       this.statusEl.textContent = "Error: " + e.message;
     }
+  }
+
+  // P/E and P/S are computed from the macrotrends scrape; if a ratio series came
+  // back empty (no scraped rows yet), re-fetch until the scraper fills it in.
+  _maybePollMetrics() {
+    if (!this.metricSeries) return;
+    const empty = METRICS.some((m, i) => {
+      if (m.key === "price") return false;
+      const s = this.metricSeries[i];
+      return !s || !s.c || !s.c.some((x) => x != null);
+    });
+    if (!empty) return;
+    this._metTries = this._metTries || 0;
+    if (this._metTries >= 15) return;   // ~5 min, then give up
+    clearTimeout(this._metTimer);
+    this._metTimer = setTimeout(async () => {
+      this._metTries++;
+      const range = this.viewState.range;
+      try {
+        const results = await Promise.all(METRICS.map((m) =>
+          getHistory(range, m.key, [this.symbol])
+            .then((s) => s[this.symbol]).catch(() => null)));
+        if (range === this.viewState.range) {   // ignore if the user switched
+          this.metricSeries = results;
+          await this._loadCompare();
+          this._renderCharts();
+        }
+      } catch (e) { /* keep trying */ }
+      this._maybePollMetrics();
+    }, 20000);
   }
 
   async fetchStats() {
@@ -754,7 +789,27 @@ export class StockPane {
       this.earningsData = res.earnings;
       this.renderInfo();
       this._drawZigzag();   // now that earnings are in, redraw with the markers
+      this._maybePollProfile();
     } catch (e) { /* best-effort; charts still work */ }
+  }
+
+  // the description comes from yfinance's .info, which often arrives a fetch or
+  // two late; if it's missing, re-fetch the profile until it shows up.
+  _maybePollProfile() {
+    if (this.profileData && this.profileData.description) return;
+    this._profTries = this._profTries || 0;
+    if (this._profTries >= 15) return;   // ~5 min, then give up
+    clearTimeout(this._profTimer);
+    this._profTimer = setTimeout(async () => {
+      this._profTries++;
+      try {
+        const res = await getProfile(this.symbol);
+        if (res.profile) this.profileData = res.profile;
+        if (res.earnings) this.earningsData = res.earnings;
+        this.renderInfo();
+      } catch (e) { /* keep trying */ }
+      this._maybePollProfile();
+    }, 20000);
   }
 
   async fetchFinancials() {
@@ -772,7 +827,7 @@ export class StockPane {
       const s = this.finData && this.finData.series && this.finData.series[f.key];
       return !s || !s.t || !s.t.length;
     });
-    if (!anyEmpty) { this._finPolling = false; return; }
+    if (!anyEmpty) { this._finPolling = false; this._drawFinancials(); return; }  // all in -> draw
     this._finTries = this._finTries || 0;
     if (this._finTries >= 30) { this._finPolling = false; this._drawFinancials(); return; }  // ~10 min
     this._finPolling = true;
