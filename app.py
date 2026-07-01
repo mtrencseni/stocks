@@ -57,6 +57,7 @@ RANGES = {
 TTL = {"1d": 60, "1w": 300, "1mo": 3600, "3mo": 3600, "6mo": 3600,
        "1y": 3600, "3y": 3600, "5y": 3600}
 STATS_TTL = 1800  # today's snapshot stats; refreshed at most every 30 min
+STATS_EMPTY_TTL = 60  # but retry an incomplete stats payload quickly
 
 REGULAR_OPEN = (9, 30)   # America/New_York
 REGULAR_CLOSE = (16, 0)
@@ -549,6 +550,16 @@ def build_stats(symbols):
     return out
 
 
+def _stats_complete(payload):
+    """All symbols have at least a price/market-cap reading. An incomplete
+    payload (e.g. .info came back empty for a symbol) is cached only briefly so
+    a refresh retries instead of pinning the blank row for the full 30 min."""
+    stats = (payload or {}).get("stats") or {}
+    return bool(stats) and all(
+        s and (s.get("open") is not None or s.get("marketCap") is not None)
+        for s in stats.values())
+
+
 @app.route("/api/stats")
 def stats():
     symbols = [s.strip().upper() for s in request.args.get("symbols", "").split(",") if s.strip()]
@@ -559,8 +570,10 @@ def stats():
     key = tuple(symbols)
     now = time.time()
     hit = _stats_cache.get(key)
-    if hit and now - hit[0] < STATS_TTL:
-        return jsonify(hit[1])
+    if hit:
+        ttl = STATS_TTL if _stats_complete(hit[1]) else STATS_EMPTY_TTL
+        if now - hit[0] < ttl:
+            return jsonify(hit[1])
 
     try:
         payload = {"stats": build_stats(symbols)}

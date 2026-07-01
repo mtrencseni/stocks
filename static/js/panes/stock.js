@@ -248,6 +248,7 @@ export class StockPane {
     if (this._btRO) this._btRO.disconnect();
     clearTimeout(this._finTimer);
     clearTimeout(this._profTimer);
+    clearTimeout(this._statTimer);
     clearTimeout(this._metTimer);
     cancelAnimationFrame(this._btRAF);
     for (const id in this.pollTimers) clearInterval(this.pollTimers[id]);
@@ -779,7 +780,27 @@ export class StockPane {
       const stats = await getStats([this.symbol]);
       this.statsData = stats[this.symbol];
       this.renderInfo();
+      this._maybePollStats();
     } catch (e) { /* best-effort */ }
+  }
+
+  // the header stats come from yfinance's .info, which is occasionally empty on
+  // first fetch; if the row is blank, re-fetch until it fills in.
+  _maybePollStats() {
+    const s = this.statsData;
+    if (s && (s.open != null || s.marketCap != null)) return;
+    this._statTries = this._statTries || 0;
+    if (this._statTries >= 15) return;   // ~5 min, then give up
+    clearTimeout(this._statTimer);
+    this._statTimer = setTimeout(async () => {
+      this._statTries++;
+      try {
+        const stats = await getStats([this.symbol]);
+        if (stats[this.symbol]) this.statsData = stats[this.symbol];
+        this.renderInfo();
+      } catch (e) { /* keep trying */ }
+      this._maybePollStats();
+    }, 20000);
   }
 
   async fetchProfile() {
