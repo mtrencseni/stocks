@@ -12,11 +12,13 @@ import {
   metricLabel, fmtVal, fmtTime, nearestIdx, rgba, etYMD, fmtMoneyM,
 } from "./util.js";
 
+let _measureSeq = 0;   // unique ids for per-chart SVG arrowhead markers
+
 export class CrosshairGroup {
   constructor() { this.pinXval = null; this.cards = []; }
   clear() { this.cards = []; this.pinXval = null; }
   reset() { this.pinXval = null; this.renderAll(); }   // e.g. on range/metric change
-  renderAll() { for (const c of this.cards) renderPin(c, this); }
+  renderAll() { for (const c of this.cards) { renderPin(c, this); renderMeasure(c, this); } }
 }
 
 function hidePin(card) {
@@ -77,6 +79,52 @@ function renderPin(card, group) {
   }
 }
 
+function hideMeasure(card) {
+  if (card.mSvg) card.mSvg.style.display = "none";
+  if (card.measureBox) card.measureBox.style.display = "none";
+}
+
+// The right-click measurement tool: a gray dot anchored at the right-clicked
+// time and a gray arrow to the point under the cursor — both endpoints snapped
+// onto the line (value at that time) — with a fixed box at the anchor showing
+// the % change from anchor value to cursor value. The end tracks the shared
+// crosshair time (group.pinXval), so it updates as the mouse moves.
+function renderMeasure(card, group) {
+  const u = card.chart, m = card.measure;
+  if (!u || !m || !card.mSvg) { hideMeasure(card); return; }
+  const xs = u.data[0], arr = u.data[card.priceIdx];
+  const aVal = arr[m.idx];
+  if (aVal == null) { hideMeasure(card); return; }
+  let bIdx = m.idx;
+  if (group.pinXval != null) {
+    const j = nearestIdx(xs, group.pinXval);
+    if (j != null) bIdx = j;
+  }
+  const bVal = arr[bIdx];
+  if (bVal == null) { hideMeasure(card); return; }
+
+  const ax = u.valToPos(xs[m.idx], "x"), ay = u.valToPos(aVal, "y");
+  const bx = u.valToPos(xs[bIdx], "x"), by = u.valToPos(bVal, "y");
+  const W = u.over.clientWidth, H = u.over.clientHeight;
+  card.mSvg.setAttribute("width", W);
+  card.mSvg.setAttribute("height", H);
+  card.mSvg.style.display = "block";
+  const set = (sel, attrs) => {
+    const el = card.mSvg.querySelector(sel);
+    for (const k in attrs) el.setAttribute(k, attrs[k]);
+  };
+  set(".m-shaft", { x1: ax, y1: ay, x2: bx, y2: by });
+  set(".m-a", { cx: ax, cy: ay });
+
+  const pct = (bVal / aVal - 1) * 100;
+  const box = card.measureBox;
+  box.textContent = (pct >= 0 ? "+" : "") + pct.toFixed(1) + "%";
+  box.className = "measure-box " + (pct >= 0 ? "up" : "down");
+  box.style.left = ax + "px";
+  box.style.top = ay + "px";
+  box.style.display = "block";
+}
+
 // keep the compare dropdown + clear button in sync: first option reads "Hide"
 // when a reference is active (so re-picking it removes), and the X shows only then.
 export function syncCompareUI(selectEl, clearBtn, value) {
@@ -125,6 +173,7 @@ export function buildCard(sym) {
     chgEl: el.querySelector(".chg"),
     statsEl: el.querySelector(".stats"),
     chart: null, vline: null, dot: null, tip: null,
+    mSvg: null, measureBox: null, measure: null,
     priceIdx: 1,
     range: null, metric: null, times: null,
   };
@@ -138,11 +187,13 @@ export function renderCard(card, opts) {
     card.chart.destroy();
     card.chart = null;
     card.vline = card.dot = card.tip = null;   // removed with the old plot DOM
+    card.mSvg = card.measureBox = null;
   }
   card.el.classList.remove("empty");
   card.chartEl.innerHTML = "";   // clear any prior "no data" text or stale DOM
   card.range = range;
   card.metric = metric;
+  card.measure = null;   // a rebuilt chart (new indices/values) drops the measurement
 
   if (!s || !s.c || s.c.filter((v) => v != null).length === 0) {
     card.el.classList.add("empty");
@@ -238,6 +289,23 @@ export function renderCard(card, opts) {
   over.append(vline, hline, dot, tip, pcts.ba, pcts.bb, pcts.aa, pcts.ab);
   card.vline = vline; card.hline = hline; card.dot = dot; card.tip = tip; card.pcts = pcts;
 
+  // right-click measurement overlay: a gray SVG arrow + a fixed % box, both
+  // pointer-events:none so the chart still receives mouse events beneath them
+  const SVGNS = "http://www.w3.org/2000/svg";
+  const mSvg = document.createElementNS(SVGNS, "svg");
+  mSvg.setAttribute("class", "measure-svg");
+  const uid = ++_measureSeq;
+  mSvg.innerHTML =
+    `<defs><marker id="mah-${uid}" markerWidth="7" markerHeight="7" refX="5.5" refY="3"` +
+    ` orient="auto" markerUnits="userSpaceOnUse">` +
+    `<path d="M0,0 L6,3 L0,6 Z" fill="${GRAY}"></path></marker></defs>` +
+    `<line class="m-shaft" marker-end="url(#mah-${uid})"></line>` +
+    `<circle class="m-a" r="3.5"></circle>`;
+  const measureBox = document.createElement("div");
+  measureBox.className = "measure-box";
+  over.append(mSvg, measureBox);
+  card.mSvg = mSvg; card.measureBox = measureBox;
+
   // moving over any chart updates the shared pin; leaving keeps it frozen
   over.addEventListener("mousemove", (e) => {
     const rect = over.getBoundingClientRect();
@@ -245,7 +313,25 @@ export function renderCard(card, opts) {
     group.renderAll();
   });
 
+  // right-click anchors a measurement; the next click (either button) ends it
+  // without starting a new one
+  over.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (card.measure) { card.measure = null; hideMeasure(card); return; }
+    const rect = over.getBoundingClientRect();
+    const xval = card.chart.posToVal(e.clientX - rect.left, "x");
+    const idx = nearestIdx(card.chart.data[0], xval);
+    if (idx == null) return;
+    card.measure = { idx };
+    group.pinXval = xval;          // the arrow tip starts under the cursor
+    group.renderAll();
+  });
+  over.addEventListener("click", () => {
+    if (card.measure) { card.measure = null; hideMeasure(card); }
+  });
+
   renderPin(card, group);   // restore the frozen crosshair on this freshly-built chart
+  renderMeasure(card, group);
 }
 
 // ---- zigzag (upswing) view ----

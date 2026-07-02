@@ -859,6 +859,34 @@ body.sidebar-collapsed .stock-info { padding-left: 50px; }
   z-index: 3;
 }
 
+/* right-click measurement: gray anchor dot + arrow, fixed % box at the anchor */
+.measure-svg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  display: none;
+  z-index: 3;
+}
+.measure-svg .m-shaft { stroke: #9aa0a6; stroke-width: 1.5px; }
+.measure-svg .m-a { fill: #9aa0a6; }
+.measure-box {
+  position: absolute;
+  transform: translate(-50%, calc(-100% - 9px));
+  padding: 1px 6px;
+  background: #0b0b0c;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  pointer-events: none;
+  display: none;
+  z-index: 4;
+}
+.measure-box.up { color: var(--up); }
+.measure-box.down { color: var(--down); }
+
 /* today's static stats, Google-style 3x3 */
 .stats {
   flex: 0 0 auto;
