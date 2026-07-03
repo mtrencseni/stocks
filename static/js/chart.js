@@ -15,9 +15,14 @@ import {
 let _measureSeq = 0;   // unique ids for per-chart SVG arrowhead markers
 
 export class CrosshairGroup {
-  constructor() { this.pinXval = null; this.cards = []; }
-  clear() { this.cards = []; this.pinXval = null; }
-  reset() { this.pinXval = null; this.renderAll(); }   // e.g. on range/metric change
+  // measureAnchor / measureEnd are x-values (in pinXval space), shared across
+  // the group so the arrow spans the same time on every chart. State:
+  //   anchor == null                 -> idle (normal crosshair)
+  //   anchor != null, end == null    -> drawing (end follows the cursor)
+  //   anchor != null, end != null    -> frozen
+  constructor() { this.pinXval = null; this.cards = []; this.measureAnchor = null; this.measureEnd = null; }
+  clear() { this.cards = []; this.pinXval = null; this.measureAnchor = null; this.measureEnd = null; }
+  reset() { this.pinXval = null; this.measureAnchor = null; this.measureEnd = null; this.renderAll(); }
   renderAll() { for (const c of this.cards) { renderPin(c, this); renderMeasure(c, this); } }
 }
 
@@ -36,7 +41,8 @@ function hideHline(card) {
 // draw the crosshair on one chart at the group's pinXval
 function renderPin(card, group) {
   const u = card.chart;
-  if (!u || group.pinXval == null) { hidePin(card); return; }
+  // in measurement (arrow) mode the crosshair + above/below % are suppressed
+  if (!u || group.pinXval == null || group.measureAnchor != null) { hidePin(card); return; }
   const idx = nearestIdx(u.data[0], group.pinXval);
   if (idx == null) { hidePin(card); return; }
   const left = u.valToPos(u.data[0][idx], "x");
@@ -84,26 +90,30 @@ function hideMeasure(card) {
   if (card.measureBox) card.measureBox.style.display = "none";
 }
 
-// The right-click measurement tool: a gray dot anchored at the right-clicked
-// time and a gray arrow to the point under the cursor — both endpoints snapped
-// onto the line (value at that time) — with a fixed box at the anchor showing
-// the % change from anchor value to cursor value. The end tracks the shared
-// crosshair time (group.pinXval), so it updates as the mouse moves.
+// The measurement tool: a gray dot anchored at the left-clicked time and a gray
+// arrow to the end point — both snapped onto the line (value at that time) —
+// with a fixed box at the anchor showing the % change. While drawing, the end
+// follows the shared cursor (group.pinXval); once frozen it sits at
+// group.measureEnd. Anchor/end are group-shared so every chart draws the same
+// span at its own values.
 function renderMeasure(card, group) {
-  const u = card.chart, m = card.measure;
-  if (!u || !m || !card.mSvg) { hideMeasure(card); return; }
+  const u = card.chart;
+  if (!u || group.measureAnchor == null || !card.mSvg) { hideMeasure(card); return; }
   const xs = u.data[0], arr = u.data[card.priceIdx];
-  const aVal = arr[m.idx];
+  const aIdx = nearestIdx(xs, group.measureAnchor);
+  if (aIdx == null) { hideMeasure(card); return; }
+  const aVal = arr[aIdx];
   if (aVal == null) { hideMeasure(card); return; }
-  let bIdx = m.idx;
-  if (group.pinXval != null) {
-    const j = nearestIdx(xs, group.pinXval);
+  const endX = group.measureEnd != null ? group.measureEnd : group.pinXval;
+  let bIdx = aIdx;
+  if (endX != null) {
+    const j = nearestIdx(xs, endX);
     if (j != null) bIdx = j;
   }
   const bVal = arr[bIdx];
   if (bVal == null) { hideMeasure(card); return; }
 
-  const ax = u.valToPos(xs[m.idx], "x"), ay = u.valToPos(aVal, "y");
+  const ax = u.valToPos(xs[aIdx], "x"), ay = u.valToPos(aVal, "y");
   const bx = u.valToPos(xs[bIdx], "x"), by = u.valToPos(bVal, "y");
   const W = u.over.clientWidth, H = u.over.clientHeight;
   card.mSvg.setAttribute("width", W);
@@ -173,7 +183,7 @@ export function buildCard(sym) {
     chgEl: el.querySelector(".chg"),
     statsEl: el.querySelector(".stats"),
     chart: null, vline: null, dot: null, tip: null,
-    mSvg: null, measureBox: null, measure: null,
+    mSvg: null, measureBox: null,
     priceIdx: 1,
     range: null, metric: null, times: null,
   };
@@ -193,7 +203,6 @@ export function renderCard(card, opts) {
   card.chartEl.innerHTML = "";   // clear any prior "no data" text or stale DOM
   card.range = range;
   card.metric = metric;
-  card.measure = null;   // a rebuilt chart (new indices/values) drops the measurement
 
   if (!s || !s.c || s.c.filter((v) => v != null).length === 0) {
     card.el.classList.add("empty");
@@ -313,21 +322,33 @@ export function renderCard(card, opts) {
     group.renderAll();
   });
 
-  // right-click anchors a measurement; the next click (either button) ends it
-  // without starting a new one
-  over.addEventListener("contextmenu", (e) => {
-    e.preventDefault();
-    if (card.measure) { card.measure = null; hideMeasure(card); return; }
+  // Measurement clicks: 1st left = start, 2nd left = freeze, 3rd left = start a
+  // new one; right-click abandons. Left-clicks are debounced so a double-click
+  // (used on the Stocks grid to open a detail page) doesn't also draw an arrow.
+  let clickTimer = null;
+  const measureClick = (xval) => {
+    if (group.measureAnchor == null) {            // idle -> start drawing
+      group.measureAnchor = xval; group.measureEnd = null; group.pinXval = xval;
+    } else if (group.measureEnd == null) {        // drawing -> freeze
+      group.measureEnd = xval;
+    } else {                                      // frozen -> start a new arrow
+      group.measureAnchor = xval; group.measureEnd = null; group.pinXval = xval;
+    }
+    group.renderAll();
+  };
+  over.addEventListener("click", (e) => {
     const rect = over.getBoundingClientRect();
     const xval = card.chart.posToVal(e.clientX - rect.left, "x");
-    const idx = nearestIdx(card.chart.data[0], xval);
-    if (idx == null) return;
-    card.measure = { idx };
-    group.pinXval = xval;          // the arrow tip starts under the cursor
-    group.renderAll();
+    clearTimeout(clickTimer);
+    clickTimer = setTimeout(() => measureClick(xval), 220);
   });
-  over.addEventListener("click", () => {
-    if (card.measure) { card.measure = null; hideMeasure(card); }
+  over.addEventListener("dblclick", () => clearTimeout(clickTimer));   // let dblclick win
+  over.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    clearTimeout(clickTimer);
+    if (group.measureAnchor != null) {            // abandon
+      group.measureAnchor = null; group.measureEnd = null; group.renderAll();
+    }
   });
 
   renderPin(card, group);   // restore the frozen crosshair on this freshly-built chart
