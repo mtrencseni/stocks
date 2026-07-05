@@ -7,8 +7,9 @@
 // sync is scoped to that pane's charts only (no leaking across panes).
 
 import {
-  UP, DOWN, GRAY, tzDate, fmtPrice, changeText, statsHTML,
+  UP, DOWN, GRAY, PURPLE, tzDate, fmtPrice, changeText, statsHTML,
   intradayValues, dayTickSplits, ordinalValues, makeFill, prevCloseLine,
+  thresholdLine, thresholdStroke, fmtThresh,
   metricLabel, fmtVal, fmtTime, nearestIdx, rgba, etYMD, fmtMoneyM,
 } from "./util.js";
 
@@ -164,6 +165,41 @@ export function refOverlay(refData, series) {
   return arr;
 }
 
+// Inline editor for the tiny buy-below label: swap in a text input, commit on
+// Enter/blur (onSave(price); 0 or blank clears), cancel on Escape. onSave is
+// expected to persist + re-render, which restores the label text.
+export function startThresholdEdit(el, current, onSave) {
+  if (el.querySelector("input")) return;   // already editing
+  const prev = el.textContent;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "thresh-input";
+  input.value = current != null ? String(current) : "";
+  input.placeholder = "0";
+  el.textContent = "";
+  el.appendChild(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    if (commit) {
+      const v = parseFloat(input.value);
+      onSave(!isFinite(v) || v <= 0 ? 0 : v);
+    } else {
+      el.textContent = prev;
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("blur", () => finish(true));
+}
+
 // build the card DOM and return its handle object
 export function buildCard(sym) {
   const el = document.createElement("div");
@@ -171,6 +207,7 @@ export function buildCard(sym) {
   el.innerHTML = `
     <div class="card-head">
       <span class="sym">${sym}</span>
+      <span class="thresh" title="Buy-below price (double-click to set)">0</span>
       <span class="price">—</span>
       <span class="chg"></span>
     </div>
@@ -181,6 +218,7 @@ export function buildCard(sym) {
     chartEl: el.querySelector(".chart"),
     priceEl: el.querySelector(".price"),
     chgEl: el.querySelector(".chg"),
+    threshEl: el.querySelector(".thresh"),
     statsEl: el.querySelector(".stats"),
     chart: null, vline: null, dot: null, tip: null,
     mSvg: null, measureBox: null,
@@ -189,9 +227,13 @@ export function buildCard(sym) {
   };
 }
 
-// (re)render a card's chart from a series object. opts: {range, metric, series, yRange, group}
+// (re)render a card's chart from a series object.
+// opts: {range, metric, series, yRange, group, overlay, threshold}
 export function renderCard(card, opts) {
   const { range, metric, series: s, yRange, group, overlay } = opts;
+  const threshold = opts.threshold != null ? opts.threshold : null;
+  // the buy-below threshold is a $ price, so it only applies to price charts
+  const useThresh = metric === "price" && threshold != null;
 
   if (card.chart) {
     card.chart.destroy();
@@ -203,6 +245,12 @@ export function renderCard(card, opts) {
   card.chartEl.innerHTML = "";   // clear any prior "no data" text or stale DOM
   card.range = range;
   card.metric = metric;
+
+  // tiny buy-below label, left of the price ("$0" when unset)
+  if (card.threshEl) {
+    card.threshEl.textContent = fmtThresh(threshold);
+    card.threshEl.classList.toggle("set", threshold != null);
+  }
 
   if (!s || !s.c || s.c.filter((v) => v != null).length === 0) {
     card.el.classList.add("empty");
@@ -217,9 +265,10 @@ export function renderCard(card, opts) {
   const base = (range === "1d" && s.prevClose != null) ? s.prevClose : valid[0];
   const col = last >= base ? UP : DOWN;
   const [chgTxt, chgCls] = changeText(last, base);
+  const below = useThresh && last < threshold;   // current price under the threshold
 
   card.priceEl.textContent = fmtPrice(last);
-  card.priceEl.className = "price " + chgCls;
+  card.priceEl.className = "price " + (below ? "below-thresh" : chgCls);
   card.chgEl.textContent = chgTxt;
   card.chgEl.className = "chg " + chgCls;
 
@@ -231,6 +280,9 @@ export function renderCard(card, opts) {
   const xAxisBase = { stroke: GRAY, grid: { show: false }, ticks: { show: false },
                       font: axisFont, size: 30 };
 
+  // below the threshold the line turns purple (gradient split at the threshold y)
+  const lineStroke = useThresh ? thresholdStroke(col, threshold) : col;
+
   if (range === "1d" && s.session) {
     // real time axis (single day, small gaps), regular colored over gray full line
     const reg = s.c.map((v, i) => (s.session[i] === 1 ? v : null));
@@ -238,14 +290,14 @@ export function renderCard(card, opts) {
     seriesOpt = [
       {},
       { stroke: GRAY, width: 1, points: { show: false } },
-      { stroke: col, width: 2, fill: makeFill(col), points: { show: false } },
+      { stroke: lineStroke, width: 2, fill: makeFill(col), points: { show: false } },
     ];
     xScale = { time: true };
     xAxis = { ...xAxisBase, values: intradayValues };
   } else {
     // ordinal axis: x = bar index, so overnight/weekend gaps collapse
     const xs = s.t.map((_, i) => i);
-    const mainOpt = { stroke: col, width: 2, fill: makeFill(col), points: { show: false } };
+    const mainOpt = { stroke: lineStroke, width: 2, fill: makeFill(col), points: { show: false } };
     if (overlay && overlay.length === s.c.length) {
       // "same $ into X" reference as a faint dashed background line, drawn first
       const refOpt = { stroke: "rgba(170,173,183,0.6)", width: 1.5, dash: [5, 4], points: { show: false } };
@@ -279,7 +331,10 @@ export function renderCard(card, opts) {
         ticks: { show: false }, font: axisFont, size: 48 },
     ],
     series: seriesOpt,
-    plugins: [prevCloseLine(range === "1d" ? s.prevClose : null)],
+    plugins: [
+      prevCloseLine(range === "1d" ? s.prevClose : null),
+      ...(useThresh ? [thresholdLine(threshold)] : []),
+    ],
   };
 
   card.chart = new uPlot(uopts, data, card.chartEl);

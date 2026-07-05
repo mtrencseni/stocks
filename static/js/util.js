@@ -5,6 +5,7 @@
 export const UP = "#89c996";    // RGB(137,201,150), matches --up
 export const DOWN = "#ec8a82";  // RGB(236,138,130), matches --down
 export const GRAY = "#9aa0a6";
+export const PURPLE = "#a06cd5"; // buy-below threshold line + sub-threshold price
 export const TZ = "America/New_York";
 
 // render all charts in US market time, regardless of the viewer's timezone
@@ -109,6 +110,51 @@ export function prevCloseLine(value) {
       },
     },
   };
+}
+
+// a purple dashed horizontal line at the buy-below threshold price
+export function thresholdLine(value, color = PURPLE) {
+  return {
+    hooks: {
+      draw: (u) => {
+        if (value == null) return;
+        const y = Math.round(u.valToPos(value, "y", true));
+        const ctx = u.ctx;
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(u.bbox.left, y);
+        ctx.lineTo(u.bbox.left + u.bbox.width, y);
+        ctx.stroke();
+        ctx.restore();
+      },
+    },
+  };
+}
+
+// series stroke that is `color` above the threshold price and `purple` below it,
+// split exactly at the threshold's y-position (a vertical canvas gradient)
+export function thresholdStroke(color, threshold, purple = PURPLE) {
+  return (u) => {
+    if (threshold == null) return color;
+    const top = u.bbox.top, h = u.bbox.height;
+    let f = (u.valToPos(threshold, "y", true) - top) / h;  // 0 (top) .. 1 (bottom)
+    f = Math.max(0, Math.min(1, f));
+    const g = u.ctx.createLinearGradient(0, top, 0, top + h);
+    g.addColorStop(0, color);
+    g.addColorStop(f, color);
+    g.addColorStop(f, purple);
+    g.addColorStop(1, purple);
+    return g;
+  };
+}
+
+// compact threshold price for the tiny header label: "$23", "$23.5", "$0" (unset)
+export function fmtThresh(v) {
+  if (v == null) return "$0";
+  return "$" + (v % 1 === 0 ? v.toFixed(0) : String(+v.toFixed(2)));
 }
 
 // Google-style 3x3 stat grid (row-major matches the screenshot's column order)

@@ -47,6 +47,17 @@ export async function getMarketStatus() {
   return res.json();   // { open, status, message, source }
 }
 
+export async function getThresholds() {
+  const res = await fetch("/api/thresholds");
+  return res.json();   // { SYM: price, ... }
+}
+
+export async function setThreshold(sym, price) {
+  const q = `symbol=${encodeURIComponent(sym)}&price=${encodeURIComponent(price || 0)}`;
+  const res = await fetch(`/api/threshold?${q}`, { method: "POST" });
+  return res.json();
+}
+
 export async function getReference(range, ref) {
   const res = await fetch(`/api/reference?range=${encodeURIComponent(range)}&ref=${encodeURIComponent(ref)}`);
   const json = await res.json();

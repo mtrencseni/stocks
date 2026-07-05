@@ -11,6 +11,7 @@
   --accent-fg: #15161a;
   --sidebar-bg: #141417;
   --code-bg: #141417;
+  --purple: #a06cd5;  /* buy-below threshold */
 }
 
 /* light theme: same structure, swapped palette */
@@ -26,6 +27,7 @@ body.light {
   --accent-fg: #ffffff;
   --sidebar-bg: #e9eaee;
   --code-bg: #eceef1;
+  --purple: #7c3aed;  /* buy-below threshold (deeper for light bg) */
 }
 
 html, body { transition: background-color .2s ease, color .2s ease; }
@@ -777,8 +779,30 @@ body.sidebar-collapsed .stock-info { padding-left: 50px; }
   gap: 8px;
 }
 .card-head .sym { font-weight: 700; font-size: 15px; letter-spacing: .3px; }
-.card-head .price { font-size: 20px; font-weight: 600; margin-left: auto; }
+.card-head .thresh { margin-left: auto; }        /* pushes thresh+price+chg right */
+.card-head .price { font-size: 20px; font-weight: 600; }
 .card-head .chg { font-size: 13px; font-weight: 600; }
+
+/* tiny buy-below label (double-click to edit); "$0" means unset */
+.thresh, .si-thresh {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--purple);
+  cursor: pointer;
+  user-select: none;
+}
+.thresh-input {
+  width: 46px;
+  font-size: 11px;
+  padding: 0 3px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--purple);
+  border-radius: 3px;
+}
+.thresh-input:focus { outline: none; }
+.below-thresh { color: var(--purple) !important; }
+.si-name .si-thresh { margin-left: 12px; align-self: center; }
 /* right-aligned "TTM $…" label in the quarterly financial card headers */
 .card-head .fin-sub { margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 600; }
 

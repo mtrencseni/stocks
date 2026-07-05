@@ -2,8 +2,8 @@
 
 // The original dashboard: a responsive grid of charts, now a Pane.
 
-import { getHistory, getStats, getReference, REF_OPTIONS } from "../api.js";
-import { buildCard, renderCard, refOverlay, syncCompareUI, CrosshairGroup } from "../chart.js";
+import { getHistory, getStats, getReference, REF_OPTIONS, getThresholds, setThreshold } from "../api.js";
+import { buildCard, renderCard, refOverlay, syncCompareUI, startThresholdEdit, CrosshairGroup } from "../chart.js";
 import { statsHTML, isMobile } from "../util.js";
 
 const DEFAULT_SYMBOLS =
@@ -44,6 +44,8 @@ export class StocksPane {
     this.lastSeries = null;
     this.refData = null;     // {t, rel} for the selected reference
     this.overlays = {};      // sym -> per-bar "same $" overlay array
+    this.thresholds = {};    // sym -> buy-below price
+    this._yRange = null;     // last computed shared y-range (for single-card re-render)
     this.updatedAt = null;
     this.inited = false;
     this.statusTimer = null;
@@ -167,11 +169,19 @@ export class StocksPane {
     if (!this.inited) {
       this.inited = true;
       this.buildGrid();
+      this.fetchThresholds();
       this.fetchHistory(this.viewState.range);
       this.fetchStats();
       this.statusTimer = setInterval(() => this.renderStatus(), 60000);
     }
     this.resizeAll();
+  }
+
+  fetchThresholds() {
+    getThresholds().then((t) => {
+      this.thresholds = t || {};
+      if (this.lastSeries) this.applyRender();   // repaint with the buy-below lines
+    }).catch(() => {});
   }
   onDeactivate() {}
 
@@ -204,9 +214,37 @@ export class StocksPane {
     for (const sym of this.symbols) {
       const card = buildCard(sym);
       card.el.dataset.sym = sym;
+      // double-click the tiny buy-below label to edit it (don't let it bubble
+      // to the grid's dblclick-opens-detail handler)
+      if (card.threshEl) {
+        card.threshEl.addEventListener("dblclick", (e) => {
+          e.stopPropagation();
+          startThresholdEdit(card.threshEl, this.thresholds[sym] ?? null,
+            (price) => this._saveThreshold(sym, price));
+        });
+      }
       this.grid.appendChild(card.el);
       this.cards[sym] = card;
     }
+  }
+
+  _saveThreshold(sym, price) {
+    if (price > 0) this.thresholds[sym] = price;
+    else delete this.thresholds[sym];
+    setThreshold(sym, price).catch(() => {});
+    this._renderOne(sym);   // repaint this card's chart + header with the change
+  }
+
+  _renderOne(sym) {
+    const card = this.cards[sym];
+    if (!card) return;
+    renderCard(card, {
+      range: this.viewState.range, metric: this.viewState.metric,
+      series: this.lastSeries && this.lastSeries[sym], yRange: this._yRange,
+      group: this.cross, overlay: this.overlays[sym] || null,
+      threshold: this.thresholds[sym] ?? null,
+    });
+    this.cross.renderAll();
   }
 
   async fetchHistory(range) {
@@ -245,6 +283,7 @@ export class StocksPane {
         yRange = [mn - pad, mx + pad];
       }
     }
+    this._yRange = yRange;
 
     this.cross.cards = [];
     for (const sym of this.symbols) {
@@ -252,6 +291,7 @@ export class StocksPane {
       renderCard(card, {
         range: this.viewState.range, metric: this.viewState.metric,
         series: series[sym], yRange, group: this.cross, overlay: this.overlays[sym] || null,
+        threshold: this.thresholds[sym] ?? null,
       });
       this.cross.cards.push(card);
     }

@@ -7,11 +7,11 @@
 import {
   getHistory, getStats, getProfile, getFinancials,
   startOpinion, opinionStatus, listOpinions, getOpinion, deleteOpinion,
-  backtestSweep, runBacktest, getReference, REF_OPTIONS,
+  backtestSweep, runBacktest, getReference, REF_OPTIONS, getThresholds, setThreshold,
 } from "../api.js";
-import { buildCard, renderCard, refOverlay, syncCompareUI, renderZigzag, renderQuarterly, CrosshairGroup } from "../chart.js";
+import { buildCard, renderCard, refOverlay, syncCompareUI, startThresholdEdit, renderZigzag, renderQuarterly, CrosshairGroup } from "../chart.js";
 import { renderOutcomePrice, renderHistogram, renderSweepPanel, HOLD_COLORS } from "../backtestcharts.js";
-import { statsHTML, fmtMoneyM, fmtPrice } from "../util.js";
+import { statsHTML, fmtMoneyM, fmtPrice, fmtThresh } from "../util.js";
 
 function escapeHTML(s) {
   return (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -117,6 +117,7 @@ export class StockPane {
     this.profileData = null;
     this.statsData = null;
     this.earningsData = null;
+    this.threshold = null;    // buy-below price for this symbol
     this.finData = null;
     this.finEls = {};
     this.tabs = [];           // opinion tabs: {key(ts), ts, jobId?, state, status?}
@@ -232,6 +233,7 @@ export class StockPane {
       this.fetchAll(this.viewState.range);
       this.fetchStats();
       this.fetchProfile();
+      this.fetchThreshold();
       this.fetchFinancials();
       this.loadZigzag();
       this._renderSubtabs();
@@ -710,6 +712,7 @@ export class StockPane {
       renderCard(this.cards[i], {
         range: this.viewState.range, metric: m.key, series: this.metricSeries[i],
         yRange: null, group: this.cross, overlay,
+        threshold: m.key === "price" ? (this.threshold ?? null) : null,
       });
       this.cross.cards.push(this.cards[i]);
     });
@@ -888,8 +891,13 @@ export class StockPane {
     const desc = p && p.description ? p.description : "";
     const stats = st ? `<div class="si-stats stats">${statsHTML(st)}</div>` : "";
     const earn = e ? `<div class="si-earn">${earningsHTML(e)}</div>` : "";
+    const th = this.threshold ?? null;
+    const below = th != null && this.lastPrice != null && this.lastPrice < th;
+    const threshTxt = fmtThresh(th);
+    const thresh = `<span class="si-thresh${th != null ? " set" : ""}" title="Buy-below price (double-click to set)">${threshTxt}</span>`;
     const price = this.lastPrice != null
-      ? ` <span class="si-price">$${fmtPrice(this.lastPrice)}</span>` : "";
+      ? ` ${thresh}<span class="si-price${below ? " below-thresh" : ""}">$${fmtPrice(this.lastPrice)}</span>`
+      : ` ${thresh}`;
     const descHTML = desc
       ? `<div class="si-desc" title="${escapeAttr(desc)}">${escapeHTML(desc)}</div>`
       : `<div class="si-desc si-desc-empty">No description available.</div>`;
@@ -904,7 +912,29 @@ export class StockPane {
           descHTML +
         `</div>` + stats + earn +
       `</div>`;
+    const threshEl = this.infoEl.querySelector(".si-thresh");
+    if (threshEl) {
+      threshEl.addEventListener("dblclick", (e) => {
+        e.stopPropagation();
+        startThresholdEdit(threshEl, this.threshold ?? null, (price) => this._saveThreshold(price));
+      });
+    }
     this.resizeAll();   // header height changed -> re-fit the charts below
+  }
+
+  _saveThreshold(price) {
+    this.threshold = price > 0 ? price : null;
+    setThreshold(this.symbol, price).catch(() => {});
+    this.renderInfo();      // header label + price color + re-wire dblclick
+    this._renderCharts();   // repaint the price chart with the buy-below line
+  }
+
+  fetchThreshold() {
+    getThresholds().then((t) => {
+      this.threshold = (t && t[this.symbol]) ?? null;
+      this.renderInfo();
+      if (this.metricSeries) this._renderCharts();
+    }).catch(() => {});
   }
 
   resizeAll() {

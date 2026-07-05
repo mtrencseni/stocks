@@ -1130,6 +1130,62 @@ def api_universe():
     return jsonify(symbols=UNIVERSES.get(u, UNIVERSES["ndx100"]))
 
 
+# ----------------------------------------------------------------------------
+# Per-stock "buy below" threshold prices (user-set, persisted to disk)
+# ----------------------------------------------------------------------------
+_thresholds = None
+_thresh_lock = threading.Lock()
+
+
+def _thresh_path():
+    return os.path.join(DATA_DIR, "thresholds.json")
+
+
+def load_thresholds():
+    global _thresholds
+    if _thresholds is None:
+        try:
+            with open(_thresh_path()) as fh:
+                _thresholds = json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError):
+            _thresholds = {}
+    return _thresholds
+
+
+def set_threshold(sym, price):
+    """Set (price > 0) or clear (price <= 0) a symbol's buy-below threshold."""
+    with _thresh_lock:
+        t = load_thresholds()
+        if price and price > 0:
+            t[sym] = price
+        else:
+            t.pop(sym, None)
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = _thresh_path() + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(t, fh)
+        os.replace(tmp, _thresh_path())   # atomic
+    return t
+
+
+@app.route("/api/thresholds")
+def api_thresholds():
+    return jsonify(load_thresholds())
+
+
+@app.route("/api/threshold", methods=["POST"])
+def api_set_threshold():
+    sym = request.args.get("symbol", "").strip().upper()
+    if not sym:
+        return jsonify(error="bad request: need symbol"), 400
+    try:
+        price = float(request.args.get("price", "0") or 0)
+    except ValueError:
+        price = 0
+    set_threshold(sym, price)
+    return jsonify(ok=True, symbol=sym, price=(price if price > 0 else None))
+
+
 # Market open/closed from Yahoo (authoritative: handles holidays + half-days).
 # NYSE and NASDAQ share the same US session, so one status covers both.
 _market_cache = {}      # "us" -> (fetched_at, payload)
