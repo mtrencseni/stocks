@@ -16,6 +16,7 @@ import { escapeHTML, indLabel } from "../filters.js";
 import { getFactorsDetail } from "../api.js";
 import { renderDecomp } from "../decomp.js";
 import { fmtCap } from "../util.js";
+import { saveView } from "../viewstate.js";
 
 const PANELS = [
   { key: "amkt", title: "[TL] α vs market β", xKey: "b_mkt", yKey: "alpha",
@@ -134,6 +135,7 @@ export class FactorsPane extends ScreenerPane {
       const b = e.target.closest("button");
       if (!b) return;
       this.viewState.view = b.dataset.view;
+      saveView(this.id, this.viewState);
       this._syncView();
     });
     // factor strip between the filter chips and the scatter grid
@@ -178,7 +180,7 @@ export class FactorsPane extends ScreenerPane {
     this._stripInd = null;      // selected industry ETF in the strip
     this._detailSym = null;
     this._decomp = null;        // renderDecomp handle for the drawer
-    this.viewState.view = "charts";
+    if (this.viewState.view !== "table") this.viewState.view = "charts";
     this._syncView();
   }
 

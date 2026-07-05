@@ -12,6 +12,7 @@ import {
 } from "../api.js";
 import { buildCard, renderCard, refOverlay, syncCompareUI, startThresholdEdit, renderZigzag, renderQuarterly, CrosshairGroup } from "../chart.js";
 import { renderDecomp } from "../decomp.js";
+import { loadView, saveView } from "../viewstate.js";
 import { renderOutcomePrice, renderHistogram, renderSweepPanel, HOLD_COLORS } from "../backtestcharts.js";
 import { statsHTML, fmtMoneyM, fmtPrice, fmtThresh } from "../util.js";
 
@@ -111,7 +112,9 @@ export class StockPane {
     this.type = "stock";
     this.title = symbol;
     this.closable = true;
-    this.viewState = { range: "1y", compare: "" };   // in-memory, resets on reload
+    // stock panes share one remembered range + sub-tab (Charts/Backtest)
+    this._sv = loadView("stock", { range: "1y", tab: "charts" });
+    this.viewState = { range: this._sv.range, compare: "" };
     this.refData = null;        // selected reference {t, rel}
     this.metricSeries = null;   // last fetched [price, pe, ps] series
     this.cross = new CrosshairGroup();  // synced crosshair across the 3 charts
@@ -123,7 +126,7 @@ export class StockPane {
     this.finData = null;
     this.finEls = {};
     this.tabs = [];           // opinion tabs: {key(ts), ts, jobId?, state, status?}
-    this.activeTab = "charts";
+    this.activeTab = this._sv.tab === "backtest" ? "backtest" : "charts";   // only stable tabs restore
     this.pollTimers = {};     // jobId -> interval handle
     this.inited = false;
     // backtest tab state (map+drill-down: Δ & hold are sweep coordinates)
@@ -251,6 +254,7 @@ export class StockPane {
       this.loadDecomp();
       this._renderSubtabs();
       this._loadOpinionList();
+      if (this.activeTab === "backtest") this._selectTab("backtest");   // restore sub-tab
     }
     if (this.activeTab === "charts") this.resizeAll();
   }
@@ -301,6 +305,9 @@ export class StockPane {
 
   _selectTab(key) {
     this.activeTab = key;
+    if (key === "charts" || key === "backtest") {   // remember only the stable tabs
+      saveView("stock", { range: this.viewState.range, tab: key });
+    }
     const charts = key === "charts";
     const bt = key === "backtest";
     this.chartsView.hidden = !charts;
@@ -750,6 +757,7 @@ export class StockPane {
 
   async fetchAll(range) {
     this.viewState.range = range;
+    saveView("stock", { range, tab: this.activeTab === "backtest" ? "backtest" : "charts" });
     this._syncToolbar();
     this.statusEl.textContent = "Loading…";
     this.cross.reset();

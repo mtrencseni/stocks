@@ -8,6 +8,7 @@ import { getCalendar, getEarningsDetail } from "../api.js";
 import {
   newFilters, matches, handleFilterClick, buildFilterChipsHTML, escapeHTML,
 } from "../filters.js";
+import { loadView, saveView } from "../viewstate.js";
 
 const WINDOWS = { "1w": 7, "2w": 14, "1m": 31, "3m": 92 };
 const WIN_ORDER = ["1w", "2w", "1m", "3m"];
@@ -99,7 +100,8 @@ export class CalendarPane {
     this.title = "Earnings";
     this.closable = false;
     this.onOpenStock = opts.onOpenStock || (() => {});
-    this.viewState = { window: "1m", mode: "both", search: "" };
+    const v = loadView("earnings", { window: "1m", mode: "both" });   // remembered across reloads
+    this.viewState = { window: v.window, mode: v.mode, search: "" };
     this.filters = newFilters();
     this.entries = [];
     this.inited = false;
@@ -130,14 +132,16 @@ export class CalendarPane {
     this.statusEl = root.querySelector(".status");
     this.filtersEl = root.querySelector(".explore-filters");
     this.listEl = root.querySelector(".cal-list");
+    this._saveView = () =>
+      saveView("earnings", { window: this.viewState.window, mode: this.viewState.mode });
 
     root.querySelector('[data-group="window"]').addEventListener("click", (e) => {
       const b = e.target.closest("button"); if (!b) return;
-      this.viewState.window = b.dataset.window; this._syncToolbar(); this._render();
+      this.viewState.window = b.dataset.window; this._saveView(); this._syncToolbar(); this._render();
     });
     root.querySelector('[data-group="mode"]').addEventListener("click", (e) => {
       const b = e.target.closest("button"); if (!b) return;
-      this.viewState.mode = b.dataset.mode; this._syncToolbar(); this._render();
+      this.viewState.mode = b.dataset.mode; this._saveView(); this._syncToolbar(); this._render();
     });
     root.querySelector(".cal-search").addEventListener("input", (e) => {
       this.viewState.search = e.target.value; this._render();

@@ -12,6 +12,7 @@ import { ScatterChart } from "../scatter.js";
 import {
   indLabel, escapeHTML, newFilters, matches, handleFilterClick, buildFilterChipsHTML,
 } from "../filters.js";
+import { loadView, saveView } from "../viewstate.js";
 
 // diverging "goodness" color: red (bad) -> yellow -> green (good)
 const RED = [236, 138, 130], YEL = [230, 210, 120], GREEN = [137, 201, 150];
@@ -186,7 +187,7 @@ export class ScreenerPane {
     this.title = this.config.title;
     this.closable = false;
     this.onOpenStock = opts.onOpenStock || (() => {});
-    this.viewState = { lookback: "3y" };   // in-memory, resets on reload
+    this.viewState = loadView(this.id, { lookback: "3y" });   // remembered across reloads
     this.filters = newFilters();
     this.charts = [];
     this.inited = false;
@@ -281,6 +282,7 @@ export class ScreenerPane {
       const b = e.target.closest("button");
       if (!b) return;
       this.viewState.lookback = b.dataset.lb;
+      saveView(this.id, this.viewState);
       this._syncToolbar();
       this.load();
     });

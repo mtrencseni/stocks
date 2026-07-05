@@ -286,10 +286,11 @@ body.sidebar-collapsed .stock-info { padding-left: 50px; }
 }
 .legend-grid b { color: var(--text); }
 .legend-grid i { color: var(--accent); font-style: normal; font-size: 10.5px; }
-/* Factors table explainer: full-width wrapping paragraphs for the prose bits */
+/* Factors table explainer: sentences, not one-liners — wrap instead of scrolling */
+.table-legend .legend-grid { overflow-x: hidden; }
+.table-legend .legend-grid p { white-space: normal; }
 .table-legend .legend-grid p.lg-wide {
   grid-column: 1 / -1;
-  white-space: normal;
   margin: 6px 0 2px;
 }
 .table-legend .legend-grid p.lg-wide i { color: var(--muted); }

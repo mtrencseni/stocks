@@ -5,6 +5,7 @@
 import { getHistory, getStats, getReference, REF_OPTIONS, getThresholds, setThreshold } from "../api.js";
 import { buildCard, renderCard, refOverlay, syncCompareUI, startThresholdEdit, CrosshairGroup } from "../chart.js";
 import { statsHTML, isMobile } from "../util.js";
+import { loadView, saveView } from "../viewstate.js";
 
 const DEFAULT_SYMBOLS =
   ["ADBE", "ASAN", "META", "NOW", "NVDA", "PATH", "PYPL", "SMCI", "SNOW", "TEAM", "TSLA", "ZS"];
@@ -38,7 +39,9 @@ export class StocksPane {
     this.closable = false;
     this.onOpenStock = opts.onOpenStock || (() => {});
     this.symbols = loadSymbols();
-    this.viewState = { range: "1d", metric: "price", yaxis: "per", compare: "", stats: defaultStatsMode() };  // in-memory
+    // range + metric are remembered across reloads; stats stays UA-defaulted
+    const rv = loadView("stocks", { range: "1d", metric: "price" });
+    this.viewState = { range: rv.range, metric: rv.metric, yaxis: "per", compare: "", stats: defaultStatsMode() };
     this.cards = {};
     this.cross = new CrosshairGroup();
     this.lastSeries = null;
@@ -111,6 +114,7 @@ export class StocksPane {
       const b = e.target.closest("button");
       if (!b) return;
       this.viewState.metric = b.dataset.metric;
+      this._saveView();
       this._syncToolbar();
       this.fetchHistory(this.viewState.range);
     });
@@ -247,8 +251,13 @@ export class StocksPane {
     this.cross.renderAll();
   }
 
+  _saveView() {
+    saveView("stocks", { range: this.viewState.range, metric: this.viewState.metric });
+  }
+
   async fetchHistory(range) {
     this.viewState.range = range;
+    this._saveView();
     this._syncToolbar();
     this.statusEl.textContent = "Loading…";
     this.cross.reset();   // a frozen crosshair from a different range/metric doesn't map cleanly
