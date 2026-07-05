@@ -242,7 +242,14 @@ export class ScreenerPane {
         if (open && sym) { e.preventDefault(); this._pickSearch(sym); }
       } else if (e.key === "Enter") {
         const sym = this._activeSym();
-        if (open && sym) { e.preventDefault(); this._openDetails(sym); }
+        if (open && sym) {
+          e.preventDefault();
+          this._pickSearch(sym);   // highlight + close the dropdown
+          // panes with a custom pick (Factors -> reconstruction drawer) use it;
+          // others open the stock detail tab as before
+          if (this.config.onPick) this.config.onPick(this, sym);
+          else this.onOpenStock(sym);
+        }
       } else if (e.key === "Escape") {
         this._hideSearch();
         this.searchInput.blur();
@@ -359,13 +366,16 @@ export class ScreenerPane {
     for (const c of this.charts) c.destroy();
     this.charts = [];
     try {
-      const res = await fetch(`/api/screener?lookback=${encodeURIComponent(this.viewState.lookback)}`);
+      const lb = encodeURIComponent(this.viewState.lookback);
+      const url = this.config.endpoint ? this.config.endpoint(lb) : `/api/screener?lookback=${lb}`;
+      const res = await fetch(url);
       const json = await res.json();
       if (json.error) throw new Error(json.error);
       this._baseStatus =
         `${json.stocks.length} stocks · ${json.lookback} · as of ${(json.asof || "").slice(0, 16).replace("T", " ")}`;
       this.statusEl.textContent = this._baseStatus;
       this._build(json.stocks);
+      if (this.config.afterLoad) this.config.afterLoad(this, json);
     } catch (e) {
       this.statusEl.textContent = "Error: " + e.message;
     }
@@ -375,7 +385,8 @@ export class ScreenerPane {
     this.stocks = stocks;
     const { colorOf, radiusOf } = this.config.encode(stocks);
     const onHover = (sym) => { for (const c of this.charts) c.setHighlight(sym); };
-    const onPick = (sym) => this.onOpenStock(sym);
+    const onPick = (sym) =>
+      this.config.onPick ? this.config.onPick(this, sym) : this.onOpenStock(sym);
     const foot = this.config.tooltipFoot;
 
     for (const panel of this.config.panels) {
@@ -420,6 +431,9 @@ export class ScreenerPane {
 
 // back-compat alias (main.js used to import ExplorePane)
 export const ExplorePane = ScreenerPane;
+
+// shared bits for sibling screener-style panes (factors.js)
+export { clamp01, rgbaFor, pct, GREY, fmt };
 
 function fmt(v) { return v == null ? "—" : (Math.round(v * 100) / 100).toString(); }
 

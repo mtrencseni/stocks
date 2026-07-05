@@ -286,6 +286,13 @@ body.sidebar-collapsed .stock-info { padding-left: 50px; }
 }
 .legend-grid b { color: var(--text); }
 .legend-grid i { color: var(--accent); font-style: normal; font-size: 10.5px; }
+/* Factors table explainer: full-width wrapping paragraphs for the prose bits */
+.table-legend .legend-grid p.lg-wide {
+  grid-column: 1 / -1;
+  white-space: normal;
+  margin: 6px 0 2px;
+}
+.table-legend .legend-grid p.lg-wide i { color: var(--muted); }
 
 @media (max-width: 760px) {
   .si-top { flex-direction: column; gap: 10px; }
@@ -882,6 +889,169 @@ body.sidebar-collapsed .stock-info { padding-left: 50px; }
   display: none;
   z-index: 3;
 }
+
+/* ---- Factors pane: factor strip + reconstruction drawer ---- */
+.factors-pane .explore-grid { grid-template-rows: repeat(2, minmax(0, 1fr)); }  /* 4 panels, not 6 */
+.factor-strip {
+  flex: 0 0 auto;
+  padding: 4px 12px 6px;
+}
+.fs-cards { display: flex; align-items: stretch; gap: 10px; }
+/* industry-factor selector, right-aligned inside the filter-chips row */
+.fs-selwrap { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.fs-card {
+  flex: 1 1 0;                 /* cards share the full pane width */
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.fs-card .fs-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.fs-card .fs-label b { color: var(--text); font-weight: 700; }
+.fs-card .fs-ret { font-size: 14px; font-weight: 700; }
+.fs-spark { display: block; flex: 1 1 auto; width: 100%; min-width: 0; }
+.fs-ind-select {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 3px 4px;
+}
+/* Table view: Earnings look & feel (bordered rows, hover, sticky header) */
+.factors-table {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 12px;
+}
+.ft-head, .ft-row {
+  display: grid;
+  grid-template-columns: 64px minmax(150px, 1.4fr) 90px repeat(7, minmax(62px, .55fr));
+  gap: 12px;
+  align-items: center;
+  padding: 8px 22px;
+}
+.ft-head {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 11px; font-weight: 700;
+  letter-spacing: .03em;                 /* no uppercase: it turns α/β into Α/Β (A/B) */
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+.ft-head span { cursor: pointer; white-space: nowrap; }
+.ft-head span:hover, .ft-head span.on { color: var(--text); }
+.ft-head span:nth-child(n+4) { text-align: right; }
+.ft-row {
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  cursor: pointer;
+}
+.ft-row:hover, .ft-row.active { background: var(--panel); }
+.ft-sym { font-weight: 700; }
+.ft-name, .ft-ind {
+  color: var(--muted); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ft-num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.factors-drawer {
+  flex: 0 0 340px;                 /* head + fingerprint/contribution row + chart */
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  min-height: 0;
+}
+.factors-drawer[hidden] { display: none; }
+.fd-loading { padding: 16px; color: var(--muted); font-size: 12px; }
+.fd-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px 4px;
+  font-size: 12px;
+}
+.fd-head b { font-size: 14px; }
+.fd-sub { color: var(--muted); }
+.fd-chip { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); white-space: nowrap; }
+.fd-chip i { width: 10px; height: 3px; border-radius: 2px; display: inline-block; }
+.fd-tog { cursor: pointer; user-select: none; }
+.fd-tog:hover { color: var(--text); }
+.fd-tog.off { opacity: 0.35; text-decoration: line-through; }
+.fd-chart { position: relative; }        /* anchor for the hover tooltip */
+.fd-tip {
+  transform: none;                        /* .tip centers itself; we place by edge */
+  top: 6px;
+  flex-direction: column;                 /* applies when JS shows it (display:flex) */
+  gap: 2px;
+  padding: 4px 8px;
+}
+.fd-tip .t { margin: 0 0 2px; }
+.fdt-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+.fdt-row i { width: 10px; height: 3px; border-radius: 2px; display: inline-block; }
+.fdt-row b { margin-left: auto; color: var(--text); font-variant-numeric: tabular-nums; }
+.fd-close {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 18px;
+  cursor: pointer;
+  line-height: 1;
+}
+.fd-close:hover { color: var(--text); }
+.fd-chart { flex: 1 1 auto; min-height: 0; padding: 0 8px 6px; }
+/* extras row above the chart: beta fingerprint (L) + contribution bar (R) */
+.fd-extras {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 2px 12px 6px;
+}
+.fd-fp { flex: 0 0 280px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.fp-row { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted); }
+.fp-l { flex: 0 0 62px; text-align: right; white-space: nowrap; }
+.fp-track { flex: 1 1 auto; position: relative; height: 7px; background: var(--bg); border-radius: 3px; }
+.fp-zero { position: absolute; left: 50%; top: -1px; bottom: -1px; width: 1px; background: var(--border); }
+.fp-bar { position: absolute; top: 1px; bottom: 1px; border-radius: 2px; }
+.fp-v { flex: 0 0 34px; color: var(--text); font-variant-numeric: tabular-nums; }
+.fd-cb { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.cb-title { font-size: 11px; color: var(--muted); }
+.cb-title b { font-size: 12px; }
+.cb-bar { display: flex; align-items: stretch; height: 10px; border-radius: 3px; overflow: hidden; background: var(--bg); }
+.cb-seg { display: block; }
+.cb-zero { flex: 0 0 2px; background: var(--text); opacity: .7; }
+.cb-cap { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 10.5px; color: var(--muted); }
+.cb-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.cb-item i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.fd-dot {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%;
+  pointer-events: none;
+  display: none;
+  z-index: 3;
+}
+/* decomposition card on the stock detail page (renderDecomp fills it) */
+.decomp-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.decomp-wrap .fd-head { padding: 2px 0 4px; }
 
 /* right-click measurement: gray anchor dot + arrow, fixed % box at the anchor */
 .measure-svg {

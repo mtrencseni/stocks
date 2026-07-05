@@ -47,6 +47,14 @@ export async function getMarketStatus() {
   return res.json();   // { open, status, message, source }
 }
 
+export async function getFactorsDetail(symbol, lookback) {
+  const q = `symbol=${encodeURIComponent(symbol)}&lookback=${encodeURIComponent(lookback)}`;
+  const res = await fetch(`/api/factors/detail?${q}`);
+  const json = await res.json();
+  if (json.error) throw new Error(json.error);
+  return json;
+}
+
 export async function getThresholds() {
   const res = await fetch("/api/thresholds");
   return res.json();   // { SYM: price, ... }

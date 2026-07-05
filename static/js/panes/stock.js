@@ -8,8 +8,10 @@ import {
   getHistory, getStats, getProfile, getFinancials,
   startOpinion, opinionStatus, listOpinions, getOpinion, deleteOpinion,
   backtestSweep, runBacktest, getReference, REF_OPTIONS, getThresholds, setThreshold,
+  getFactorsDetail,
 } from "../api.js";
 import { buildCard, renderCard, refOverlay, syncCompareUI, startThresholdEdit, renderZigzag, renderQuarterly, CrosshairGroup } from "../chart.js";
+import { renderDecomp } from "../decomp.js";
 import { renderOutcomePrice, renderHistogram, renderSweepPanel, HOLD_COLORS } from "../backtestcharts.js";
 import { statsHTML, fmtMoneyM, fmtPrice, fmtThresh } from "../util.js";
 
@@ -195,7 +197,7 @@ export class StockPane {
     if (!this.inited) {
       this.inited = true;
       // 6-col grid: row 1 = 3 metric charts (span 2 = thirds); row 2 = quarterly
-      // sales + net income (span 3 = halves); row 3 = the static zigzag (full).
+      // sales + net income (span 3 = halves); row 3 = zigzag + factor decomp (halves).
       this.grid.style.gridTemplateColumns = "repeat(6, 1fr)";
       this.grid.style.gridTemplateRows = "1fr 1fr 1fr";
       for (const m of METRICS) {
@@ -220,7 +222,7 @@ export class StockPane {
       }
       const zel = document.createElement("div");
       zel.className = "card";
-      zel.style.gridColumn = "1 / -1";
+      zel.style.gridColumn = "span 3";
       zel.innerHTML =
         `<div class="card-head"><span class="sym">${this.symbol} · Upswings (3y, ≥40%)</span>` +
         `<button class="bt-open" data-act="backtest">Backtest ▸</button></div>` +
@@ -230,12 +232,23 @@ export class StockPane {
       zel.querySelector('[data-act="backtest"]').addEventListener("click",
         () => this._selectTab("backtest"));
 
+      // factor decomposition (shares row 3 with the zigzag)
+      const del = document.createElement("div");
+      del.className = "card";
+      del.style.gridColumn = "span 3";
+      del.innerHTML =
+        `<div class="card-head"><span class="sym">${this.symbol} · Factor decomposition (3y)</span></div>` +
+        `<div class="decomp-wrap"><div class="fd-loading">loading…</div></div>`;
+      this.grid.appendChild(del);
+      this.decompEl = del.querySelector(".decomp-wrap");
+
       this.fetchAll(this.viewState.range);
       this.fetchStats();
       this.fetchProfile();
       this.fetchThreshold();
       this.fetchFinancials();
       this.loadZigzag();
+      this.loadDecomp();
       this._renderSubtabs();
       this._loadOpinionList();
     }
@@ -247,6 +260,7 @@ export class StockPane {
     for (const c of this.cards) if (c.chart) c.chart.destroy();
     for (const k in this.finEls) if (this.finEls[k].chart) this.finEls[k].chart.destroy();
     if (this.zzChart) this.zzChart.destroy();
+    if (this.decompHandle) this.decompHandle.destroy();
     if (this._btRO) this._btRO.disconnect();
     clearTimeout(this._finTimer);
     clearTimeout(this._profTimer);
@@ -695,6 +709,21 @@ export class StockPane {
     this.zzChart = renderZigzag(this.zzEl, this.zzSeries.t, this.zzSeries.c, this.earningsData);
   }
 
+  // factor decomposition card (right of the zigzag; same 3y lookback).
+  // Not all tickers are in the factor universe — show the reason instead.
+  async loadDecomp() {
+    try {
+      const d = await getFactorsDetail(this.symbol, ZZ_RANGE);
+      if (this.decompHandle) this.decompHandle.destroy();
+      this.decompHandle = renderDecomp(this.decompEl, d, { compact: true });
+      this.resizeAll();
+    } catch (e) {
+      if (this.decompEl) {
+        this.decompEl.innerHTML = `<div class="fd-loading">${escapeHTML(e.message)}</div>`;
+      }
+    }
+  }
+
   // reference overlay applies to the price chart only; skipped on 1d (intraday)
   async _loadCompare() {
     this.refData = null;
@@ -947,6 +976,7 @@ export class StockPane {
     if (this.zzChart && this.zzEl) {
       this.zzChart.setSize({ width: this.zzEl.clientWidth, height: this.zzEl.clientHeight });
     }
+    if (this.decompHandle) this.decompHandle.resize();
     for (const k in this.finEls) {
       const slot = this.finEls[k];
       if (slot.chart) slot.chart.setSize({ width: slot.chartEl.clientWidth, height: slot.chartEl.clientHeight });

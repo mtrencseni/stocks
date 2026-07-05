@@ -34,6 +34,7 @@ import yfinance as yf
 from flask import Flask, jsonify, request, send_from_directory
 
 from screener import build_screener, LOOKBACK_YEARS, UNIVERSES, segment_label
+import factors as factors_mod
 import opinion
 import backtest
 
@@ -1128,6 +1129,109 @@ def api_earnings_detail():
 def api_universe():
     u = request.args.get("universe", "ndx100")
     return jsonify(symbols=UNIVERSES.get(u, UNIVERSES["ndx100"]))
+
+
+# ----------------------------------------------------------------------------
+# Factors: 3-factor model (market / industry / momentum) over the universe
+# ----------------------------------------------------------------------------
+
+FACTORS_TTL = 6 * 3600     # daily data; like the screener
+
+
+def cached_factors(lookback="3y"):
+    return swr_cached(f"factors_{lookback}",
+                      lambda: factors_mod.build_factors(lookback), FACTORS_TTL)
+
+
+@app.route("/api/factors/table")
+def api_factors_table():
+    lookback = request.args.get("lookback", "3y")
+    if lookback not in factors_mod.LOOKBACK_YEARS:
+        return jsonify(error="bad request: need valid lookback"), 400
+    try:
+        fac = cached_factors(lookback)
+        # join screener attributes (name/exchange/profitable/mktcap) so the pane
+        # can reuse the shared filter chips + search; attrs are lookback-agnostic
+        attrs = {r["sym"]: r for r in cached_screener()["stocks"]}
+        stocks = []
+        for row in fac["stocks"]:
+            a = attrs.get(row["sym"]) or {}
+            stocks.append({**row,
+                           "name": a.get("name", ""), "exchange": a.get("exchange", ""),
+                           "profitable": bool(a.get("profitable")),
+                           "mktcap": a.get("mktcap")})
+        return jsonify(asof=fac["asof"], lookback=lookback,
+                       stocks=stocks, strip=fac["strip"])
+    except Exception as exc:
+        return jsonify(error=f"factors failed: {exc}"), 502
+
+
+@app.route("/api/factors/detail")
+def api_factors_detail():
+    """Per-stock reconstruction: cumulative % paths for the actual stock, the
+    factor-fitted sum, and each factor's contribution (b * factor return),
+    date-aligned. Built additively in log space, displayed as %."""
+    sym = request.args.get("symbol", "").strip().upper()
+    lookback = request.args.get("lookback", "3y")
+    if not sym or lookback not in factors_mod.LOOKBACK_YEARS:
+        return jsonify(error="bad request: need symbol and valid lookback"), 400
+    try:
+        fac = cached_factors(lookback)
+        row = next((r for r in fac["stocks"] if r["sym"] == sym), None)
+        if row is None:
+            return jsonify(error=f"{sym} is not in the factor universe"), 404
+        f = fac["factors"]
+        ind = (f["ind"] or {}).get(row["ind"])
+        if not f["mkt"] or not f["mom"] or not ind:
+            return jsonify(error="factor series unavailable"), 502
+        maps = {
+            "mkt": dict(zip(f["mkt"]["dates"], f["mkt"]["r"])),
+            "mom": dict(zip(f["mom"]["dates"], f["mom"]["r"])),
+            "ind": dict(zip(ind["dates"], ind["r"])),
+        }
+
+        series = build(lookback, [sym])["series"].get(sym)
+        if not series or not series.get("c"):
+            return jsonify(error="no price data"), 502
+        a_daily = (row["alpha"] or 0) / 100 / factors_mod.TRADING_DAYS
+        b = {"mkt": row["b_mkt"] or 0, "ind": row["b_ind"] or 0, "mom": row["b_mom"] or 0}
+
+        t_out = []
+        cums = {"actual": 0.0, "mkt": 0.0, "ind": 0.0, "mom": 0.0, "alpha": 0.0}
+        paths = {k: [] for k in ("actual", "fitted", "mkt", "ind", "mom", "alpha")}
+        prev = None
+        first_t = None
+        pctf = lambda c: (math.exp(c) - 1) * 100
+        for t, c in zip(series["t"], series["c"]):
+            if c is None or c <= 0:
+                continue
+            if first_t is None:
+                first_t = t
+            if prev is not None:
+                d = datetime.fromtimestamp(t, NY).date().isoformat()
+                rm, ri, ro = maps["mkt"].get(d), maps["ind"].get(d), maps["mom"].get(d)
+                if rm is not None and ri is not None and ro is not None:
+                    cums["actual"] += math.log(c / prev)
+                    cums["mkt"] += b["mkt"] * rm
+                    cums["ind"] += b["ind"] * ri
+                    cums["mom"] += b["mom"] * ro
+                    cums["alpha"] += a_daily
+                    t_out.append(t)
+                    for k in ("actual", "mkt", "ind", "mom", "alpha"):
+                        paths[k].append(pctf(cums[k]))
+                    paths["fitted"].append(
+                        pctf(cums["mkt"] + cums["ind"] + cums["mom"] + cums["alpha"]))
+            prev = c
+        # anchor every path at exactly 0% on the first price day
+        if t_out and first_t is not None and first_t < t_out[0]:
+            t_out.insert(0, first_t)
+            for k in paths:
+                paths[k].insert(0, 0.0)
+        return jsonify(symbol=sym, lookback=lookback, etf=row["ind"], t=t_out,
+                       alpha=row["alpha"], b_mkt=row["b_mkt"], b_ind=row["b_ind"],
+                       b_mom=row["b_mom"], r2=row["r2"], paths=paths)
+    except Exception as exc:
+        return jsonify(error=f"factors detail failed: {exc}"), 502
 
 
 # ----------------------------------------------------------------------------
