@@ -254,6 +254,7 @@ export function renderCard(card, opts) {
 
   if (!s || !s.c || s.c.filter((v) => v != null).length === 0) {
     card.el.classList.add("empty");
+    card.el.classList.remove("below-thresh");
     card.chartEl.innerHTML = "no data";
     card.priceEl.textContent = "—";
     card.chgEl.textContent = "";
@@ -269,6 +270,8 @@ export function renderCard(card, opts) {
 
   card.priceEl.textContent = fmtPrice(last);
   card.priceEl.className = "price " + (below ? "below-thresh" : chgCls);
+  // purple outline on the whole card when the price is below the buy-below level
+  card.el.classList.toggle("below-thresh", below);
   card.chgEl.textContent = chgTxt;
   card.chgEl.className = "chg " + chgCls;
 

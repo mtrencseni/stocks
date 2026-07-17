@@ -13,6 +13,7 @@ import {
 import { buildCard, renderCard, refOverlay, syncCompareUI, startThresholdEdit, renderZigzag, renderQuarterly, CrosshairGroup } from "../chart.js";
 import { renderDecomp } from "../decomp.js";
 import { loadView, saveView } from "../viewstate.js";
+import { wireRefresh } from "../refresh.js";
 import { renderOutcomePrice, renderHistogram, renderSweepPanel, HOLD_COLORS } from "../backtestcharts.js";
 import { statsHTML, fmtMoneyM, fmtPrice, fmtThresh } from "../util.js";
 
@@ -189,6 +190,18 @@ export class StockPane {
       const tab = e.target.closest("[data-tab]");
       if (tab) this._selectTab(tab.dataset.tab);
     });
+    wireRefresh(root, () => this.refresh());
+  }
+
+  async refresh() {
+    this.fetchStats();
+    this.fetchProfile();
+    this.fetchThreshold();
+    this.fetchFinancials();
+    this.loadZigzag();
+    this.loadDecomp();
+    if (this.activeTab === "backtest") this._openBacktest();
+    await this.fetchAll(this.viewState.range);   // spins until the charts land
   }
 
   _syncToolbar() {

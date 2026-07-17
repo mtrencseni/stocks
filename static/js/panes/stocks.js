@@ -6,6 +6,7 @@ import { getHistory, getStats, getReference, REF_OPTIONS, getThresholds, setThre
 import { buildCard, renderCard, refOverlay, syncCompareUI, startThresholdEdit, CrosshairGroup } from "../chart.js";
 import { statsHTML, isMobile } from "../util.js";
 import { loadView, saveView } from "../viewstate.js";
+import { wireRefresh } from "../refresh.js";
 
 const DEFAULT_SYMBOLS =
   ["ADBE", "ASAN", "META", "NOW", "NVDA", "PATH", "PYPL", "SMCI", "SNOW", "TEAM", "TSLA", "ZS"];
@@ -102,7 +103,14 @@ export class StocksPane {
     this.statusEl = root.querySelector(".status");
     this.nav = root.querySelector(".ticker-nav");
     this._wire();
+    wireRefresh(root, () => this.refresh());
     this._syncToolbar();
+  }
+
+  async refresh() {
+    this.fetchThresholds();
+    this.fetchStats();
+    await this.fetchHistory(this.viewState.range);   // spins until prices land
   }
 
   _wire() {

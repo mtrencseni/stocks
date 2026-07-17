@@ -712,6 +712,16 @@ body.sidebar-collapsed .stock-info { padding-left: 50px; }
 .op-err { color: var(--down); }
 
 .tb-right { display: flex; align-items: center; gap: 24px; }
+.refresh-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 4px 6px; border-radius: 7px;
+  background: transparent; border: 1px solid var(--border); color: var(--muted);
+  cursor: pointer;
+}
+.refresh-btn:hover { color: var(--text); border-color: var(--muted); }
+.refresh-btn svg { display: block; }
+.refresh-btn.spinning svg { animation: refresh-spin .7s linear infinite; }
+@keyframes refresh-spin { to { transform: rotate(360deg); } }
 
 .ticker-nav { display: none; }   /* mobile-only ticker-jump row */
 
@@ -775,7 +785,12 @@ body.sidebar-collapsed .stock-info { padding-left: 50px; }
   padding: 10px 14px 8px;
 }
 
-/* highlight the chart the mouse is over */
+/* purple outline when the price is below its buy-below threshold */
+.card.below-thresh {
+  box-shadow: inset 0 0 0 2px var(--purple);
+}
+
+/* highlight the chart the mouse is over (wins over the threshold outline) */
 .card:hover {
   box-shadow: inset 0 0 0 3px var(--accent);
 }

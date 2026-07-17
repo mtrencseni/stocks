@@ -13,6 +13,7 @@ import {
   indLabel, escapeHTML, newFilters, matches, handleFilterClick, buildFilterChipsHTML,
 } from "../filters.js";
 import { loadView, saveView } from "../viewstate.js";
+import { wireRefresh } from "../refresh.js";
 
 // diverging "goodness" color: red (bad) -> yellow -> green (good)
 const RED = [236, 138, 130], YEL = [230, 210, 120], GREEN = [137, 201, 150];
@@ -292,8 +293,11 @@ export class ScreenerPane {
       root.classList.toggle("legend-open");
       requestAnimationFrame(() => this.resizeAll());
     });
+    wireRefresh(root, () => this.refresh());
     this._syncToolbar();
   }
+
+  refresh() { return this.load(); }   // re-fetch the screener/factors table
 
   _syncToolbar() {
     this.root.querySelectorAll('[data-group="lookback"] button').forEach((b) =>

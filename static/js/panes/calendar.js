@@ -9,6 +9,7 @@ import {
   newFilters, matches, handleFilterClick, buildFilterChipsHTML, escapeHTML,
 } from "../filters.js";
 import { loadView, saveView } from "../viewstate.js";
+import { wireRefresh } from "../refresh.js";
 
 const WINDOWS = { "1w": 7, "2w": 14, "1m": 31, "3m": 92 };
 const WIN_ORDER = ["1w", "2w", "1m", "3m"];
@@ -157,6 +158,7 @@ export class CalendarPane {
       if (e.target.closest(".cal-tk")) { this.onOpenStock(row.dataset.sym); return; }  // ticker -> page
       this._toggleDetail(row);                                                          // row -> drawer
     });
+    wireRefresh(root, () => this.load());
     this._syncToolbar();
   }
 
